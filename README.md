@@ -1,3 +1,10 @@
+> [!WARNING]
+> Bank-Vaults has been migrated to a new organization: https://github.com/bank-vaults
+>
+> See [this](https://github.com/orgs/bank-vaults/discussions/2118) post for changes and migration steps.
+>
+> **This project does not receive any more updates. We encourage you to upgrade.**
+
 <p align="center"><img src="docs/images/logo/bank-vaults-logo-vertical.svg" width="270"></p>
 
 <p align="center">
@@ -32,7 +39,6 @@
 
 </p>
 
-
 *Bank Vaults is a thick, tricky, shifty right with a fast and intense tube for experienced surfers only, located on Mentawai. Think heavy steel doors, secret unlocking combinations and burly guards with smack-down attitude. Watch out for clean-up sets.*
 
 *Bank-Vaults is an umbrella project which provides various tools for Vault to make using and operating Hashicorp Vault easier. It's a wrapper for the official Vault client with automatic token renewal and built-in Kubernetes support, dynamic database credential provider for Golang `database/sql` based clients. It has a CLI tool to automatically initialize, unseal, and configure Vault. It also provides a Kubernetes operator for provisioning, and a mutating webhook for injecting secrets.*
@@ -61,6 +67,9 @@ We use Vault across our large Kubernetes deployments and all the projects were `
 
 Bank-Vaults is a core part of [Banzai Cloud Pipeline](https://github.com/banzaicloud/pipeline), a Cloud Native application and devops platform that natively supports multi- and hybrid-cloud deployments.
 
+## Supported Kubernetes and Vault versions
+
+This project aims to support the [latest supported Vault image versions](https://hub.docker.com/_/vault), and three Kubernetes minor versions excluding the latest one.
 
 ## Installing
 
@@ -80,8 +89,6 @@ documentation](https://banzaicloud.com/docs/bank-vaults/contributing/).
 
 ## Bank-Vaults Support
 
-### Community Support
-
 If you encounter any problems that is not addressed in our documentation, [open an issue](https://github.com/banzaicloud/bank-vaults/issues) or talk to us on the [Banzai Cloud Slack channel #Bank-Vaults](https://banzaicloud.com/invite-slack/).
 
 If you find this project useful, help us:
@@ -90,10 +97,6 @@ If you find this project useful, help us:
 - If you use Bank-Vaults in a production environment, add yourself to the list of production [adopters](https://github.com/banzaicloud/bank-vaults/blob/main/ADOPTERS.md).:metal: <br>
 - Help new users with issues they may encounter :muscle:
 - Send a pull request with your new features and bug fixes :rocket:
-
-### Commercial Support
-
-If you are using Bank-Vaults in a production environment and [require commercial support, contact Banzai Cloud](https://banzaicloud.com/contact/), the company backing the development of Bank Vaults.
 
 ### Engineering Blog
 

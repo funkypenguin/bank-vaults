@@ -1,5 +1,74 @@
 # A Self-Documenting Makefile: http://marmelab.com/blog/2016/02/29/auto-documented-makefile.html
 
+export PATH := $(abspath bin/):${PATH}
+
+CONTAINER_IMAGE_REF = ghcr.io/banzaicloud/bank-vaults:dev
+
+# Dependency versions
+GOLANGCI_VERSION = 1.53.3
+LICENSEI_VERSION = 0.8.0
+
+.PHONY: build
+build: ## Build binary
+	@mkdir -p build
+	go build -race -o build/ ./cmd/bank-vaults
+
+.PHONY: lint
+lint: lint-go lint-docker lint-yaml
+lint: ## Run linters
+
+.PHONY: lint-go
+lint-go:
+	golangci-lint run $(if ${CI},--out-format github-actions,)
+
+.PHONY: lint-docker
+lint-docker:
+	hadolint Dockerfile
+
+.PHONY: lint-yaml
+lint-yaml:
+	yamllint $(if ${CI},-f github,) --no-warnings .
+
+.PHONY: fmt
+fmt: ## Format code
+	golangci-lint run --fix
+
+.PHONY: license-check
+license-check: ## Run license check
+	licensei check
+	licensei header
+
+deps: bin/golangci-lint bin/licensei
+deps: ## Install dependencies
+
+bin/golangci-lint:
+	@mkdir -p bin
+	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | bash -s -- v${GOLANGCI_VERSION}
+
+bin/licensei:
+	@mkdir -p bin
+	curl -sfL https://raw.githubusercontent.com/goph/licensei/master/install.sh | bash -s -- v${LICENSEI_VERSION}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 OS = $(shell uname)
 
 DOCKER_BUILD_EXTRA_ARGS ?=
@@ -14,8 +83,6 @@ BINARY_NAME ?= bank-vaults
 DOCKER_REGISTRY ?= ghcr.io/banzaicloud
 DOCKER_IMAGE = ${DOCKER_REGISTRY}/bank-vaults
 WEBHOOK_DOCKER_IMAGE = ${DOCKER_REGISTRY}/vault-secrets-webhook
-OPERATOR_DOCKER_IMAGE = ${DOCKER_REGISTRY}/vault-operator
-VAULT_ENV_DOCKER_IMAGE = ${DOCKER_REGISTRY}/vault-env
 
 # Build variables
 BUILD_DIR ?= build
@@ -35,35 +102,9 @@ DOCKER_TAG ?= ${VERSION}
 
 # Dependency versions
 GOTESTSUM_VERSION = 0.4.0
-GOLANGCI_VERSION = 1.38.0
-LICENSEI_VERSION = 0.3.1
-CODE_GENERATOR_VERSION = 0.19.3
-CONTROLLER_GEN_VERSION = v0.4.1
 
-GOLANG_VERSION = 1.17
+GOLANG_VERSION = 1.19.2
 
-## include "generic" targets
-include main-targets.mk
-
-.PHONY: up
-up: ## Set up the development environment
-
-.PHONY: down
-down: clean ## Destroy the development environment
-
-
-.PHONY: reset
-reset: down up ## Reset the development environment
-
-
-.PHONY: build-release
-build-release: LDFLAGS += -w
-build-release: build ## Build a binary without debug information
-
-.PHONY: build-debug
-build-debug: GOARGS += -gcflags "all=-N -l"
-build-debug: BINARY_NAME_SUFFIX += debug
-build-debug: build ## Build a binary with remote debugging capabilities
 
 .PHONY: docker
 docker: ## Build a Docker image
@@ -79,55 +120,12 @@ ifeq (${IMAGE_LATEST}, 1)
 	buildah tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
 endif
 
-.PHONY: docker-webhook
-docker-webhook: ## Build a Docker-webhook image
-	docker build ${DOCKER_BUILD_EXTRA_ARGS} -t ${WEBHOOK_DOCKER_IMAGE}:${DOCKER_TAG} -f Dockerfile.webhook .
-ifeq (${DOCKER_LATEST}, 1)
-	docker tag ${WEBHOOK_DOCKER_IMAGE}:${DOCKER_TAG} ${WEBHOOK_DOCKER_IMAGE}:latest
-endif
-
-.PHONY: image-webhook
-image-webhook: ## Build a webhook OCI image
-	buildah bud -t ${WEBHOOK_DOCKER_IMAGE}:${DOCKER_TAG} -f Dockerfile.webhook .
-ifeq (${IMAGE_LATEST}, 1)
-	buildah tag ${WEBHOOK_DOCKER_IMAGE}:${DOCKER_TAG} ${WEBHOOK_DOCKER_IMAGE}:latest
-endif
-
-.PHONY: docker-vault-env
-docker-vault-env: ## Build a Docker-vault-env image
-	docker build -t ${VAULT_ENV_DOCKER_IMAGE}:${DOCKER_TAG} -f Dockerfile.vault-env .
-ifeq (${DOCKER_LATEST}, 1)
-	docker tag ${VAULT_ENV_DOCKER_IMAGE}:${DOCKER_TAG} ${VAULT_ENV_DOCKER_IMAGE}:latest
-endif
-
-.PHONY: image-vault-env
-image-vault-env: ## Build an OCI vault-env image
-	buildah bud -t ${VAULT_ENV_DOCKER_IMAGE}:${DOCKER_TAG} -f Dockerfile.vault-env .
-ifeq (${IMAGE_LATEST}, 1)
-	buildah tag ${VAULT_ENV_DOCKER_IMAGE}:${DOCKER_TAG} ${VAULT_ENV_DOCKER_IMAGE}:latest
-endif
-
 .PHONY: docker-push
 docker-push: ## Push a Docker image
 	docker push ${DOCKER_IMAGE}:${DOCKER_TAG}
 ifeq (${DOCKER_LATEST}, 1)
 	docker push ${DOCKER_IMAGE}:latest
 endif
-
-.PHONY: docker-operator
-docker-operator: ## Build a Docker image for the Operator
-	docker build ${DOCKER_BUILD_EXTRA_ARGS} -t ${OPERATOR_DOCKER_IMAGE}:${DOCKER_TAG} -f Dockerfile.operator .
-ifeq (${DOCKER_LATEST}, 1)
-	docker tag ${OPERATOR_DOCKER_IMAGE}:${DOCKER_TAG} ${OPERATOR_DOCKER_IMAGE}:latest
-endif
-
-.PHONY: docker-operator-push
-docker-operator-push: ## Push a Docker image for the Operator
-	docker push ${OPERATOR_DOCKER_IMAGE}:${DOCKER_TAG}
-ifeq (${DOCKER_LATEST}, 1)
-	docker push ${OPERATOR_DOCKER_IMAGE}:latest
-endif
-
 
 .PHONY: test-%
 test-%: ## Run a specific test suite
@@ -155,28 +153,94 @@ minor: ## Release a new minor version
 major: ## Release a new major version
 	@${MAKE} release-$(shell git describe --abbrev=0 --tags | awk -F'[ .]' '{print $$1+1".0.0"}')
 
-.PHONY: operator-up
-operator-up:
-	kubectl replace -f operator/deploy/crd.yaml || kubectl create -f operator/deploy/crd.yaml
-	kubectl apply -f operator/deploy/rbac.yaml
-	OPERATOR_NAME=vault-dev go run operator/cmd/manager/main.go -verbose
+.PHONY: clean
+clean: ## Clean builds
+	rm -rf ${BUILD_DIR}/
 
-.PHONY: operator-down
-operator-down:
-	kubectl delete -f operator/deploy/crd.yaml
-	kubectl delete -f operator/deploy/rbac.yaml
-
-.PHONY: webhook-forward
-webhook-forward: ## Install the webhook chart and kurun to port-forward the local webhook into Kubernetes
-	kubectl create namespace vault-infra --dry-run -o yaml | kubectl apply -f -
-	kubectl label namespaces vault-infra name=vault-infra --overwrite
-	helm upgrade --install vault-secrets-webhook charts/vault-secrets-webhook --namespace vault-infra --set replicaCount=0 --set podsFailurePolicy=Fail --set secretsFailurePolicy=Fail
-	kurun port-forward localhost:8443 --namespace vault-infra --servicename vault-secrets-webhook --tlssecret vault-secrets-webhook-webhook-tls
-
-.PHONY: webhook-run ## Run run the webhook locally
-webhook-run:
-	KUBERNETES_NAMESPACE=vault-infra go run ./cmd/vault-secrets-webhook
+.PHONY: clear
+clear: ## Clear the working area and the project
+	rm -rf bin/ vendor/
 
 
-.PHONY: webhook-up ## Run the webhook and `kurun port-forward` in foreground. Use with make -j.
-webhook-up: webhook-run webhook-forward
+.PHONY: docker-build
+docker-build: ## Builds go binary in docker image
+	docker run -it -v $(PWD):/go/src/${PACKAGE} -w /go/src/${PACKAGE} golang:${GOLANG_VERSION}-alpine go build -o ${BINARY_NAME}_linux ${BUILD_PACKAGE}
+
+.PHONY: debug
+debug: GOARGS += -gcflags "-N -l"
+debug: BINARY_NAME := ${BINARY_NAME}-debug
+debug: build ## Builds binary package
+
+.PHONY: debug-docker
+debug-docker: debug ## Builds binary package
+	docker build -t ghcr.io/banzaicloud/${BINARY_NAME}:debug -f Dockerfile.dev .
+
+.PHONY: lint-sdk
+lint-sdk: bin/golangci-lint ## Run linter
+	cd pkg/sdk && ../../bin/golangci-lint run --disable varnamelen,ireturn,nosnakecase,exhaustruct,nonamedreturns,nilnil,contextcheck,maintidx,dupword,gosec,gomoddirectives,gci,gofumpt,gofmt,goimports,revive,staticcheck
+
+.PHONY: fix-sdk
+fix-sdk: bin/golangci-lint ## Fix lint violations
+	cd pkg/sdk && ../../bin/golangci-lint run --fix --disable varnamelen,ireturn,nosnakecase,exhaustruct,nonamedreturns,nilnil,contextcheck,maintidx,dupword,gosec,gomoddirectives,gci,gofumpt,gofmt,goimports,revive,staticcheck
+
+.PHONY: check
+check: test-integration test-sdk-integration ## Run tests and linters
+
+bin/gotestsum: bin/gotestsum-${GOTESTSUM_VERSION}
+	@ln -sf gotestsum-${GOTESTSUM_VERSION} bin/gotestsum
+bin/gotestsum-${GOTESTSUM_VERSION}:
+	@mkdir -p bin
+	curl -L https://github.com/gotestyourself/gotestsum/releases/download/v${GOTESTSUM_VERSION}/gotestsum_${GOTESTSUM_VERSION}_${OS}_amd64.tar.gz | tar -zOxf - gotestsum > ./bin/gotestsum-${GOTESTSUM_VERSION} && chmod +x ./bin/gotestsum-${GOTESTSUM_VERSION}
+
+TEST_PKGS ?= ./...
+TEST_REPORT_NAME ?= results.xml
+.PHONY: test
+test: TEST_REPORT ?= main
+test: TEST_FORMAT ?= short
+test: SHELL = /bin/bash
+test: bin/gotestsum ## Run tests
+	@mkdir -p ${BUILD_DIR}/test_results/${TEST_REPORT}
+	bin/gotestsum --no-summary=skipped --junitfile ${BUILD_DIR}/test_results/${TEST_REPORT}/${TEST_REPORT_NAME} --format ${TEST_FORMAT} -- $(filter-out -v,${GOARGS}) $(if ${TEST_PKGS},${TEST_PKGS},./...)
+
+test-sdk: TEST_REPORT ?= sdk
+test-sdk: TEST_FORMAT ?= short
+test-sdk: SHELL = /bin/bash
+test-sdk: bin/gotestsum ## Run SDK tests
+	@mkdir -p ${BUILD_DIR}/test_results/${TEST_REPORT}
+	cd pkg/sdk && ../../bin/gotestsum --no-summary=skipped --junitfile ../../${BUILD_DIR}/test_results/${TEST_REPORT}/${TEST_REPORT_NAME} --format ${TEST_FORMAT} -- $(filter-out -v,${GOARGS}) $(if ${TEST_PKGS},${TEST_PKGS},./...)
+
+.PHONY: test-all
+test-all: ## Run all tests
+	@${MAKE} GOARGS="${GOARGS} -run .\*" TEST_REPORT=all test
+
+.PHONY: test-integration
+test-integration: ## Run integration tests
+	@${MAKE} GOARGS="${GOARGS} -tags=integration" TEST_REPORT=integration test
+
+.PHONY: test-sdk-integration
+test-sdk-integration: ## Run integration tests in sdk package
+	@${MAKE} GOARGS="${GOARGS} -tags=integration" TEST_REPORT=integration test-sdk
+
+bin/jq: bin/jq-${JQ_VERSION}
+	@ln -sf jq-${JQ_VERSION} bin/jq
+bin/jq-${JQ_VERSION}:
+	@mkdir -p bin
+ifeq (${OS}, Darwin)
+	curl -L https://github.com/stedolan/jq/releases/download/jq-${JQ_VERSION}/jq-osx-amd64 > ./bin/jq-${JQ_VERSION} && chmod +x ./bin/jq-${JQ_VERSION}
+endif
+ifeq (${OS}, Linux)
+	curl -L https://github.com/stedolan/jq/releases/download/jq-${JQ_VERSION}/jq-linux64 > ./bin/jq-${JQ_VERSION} && chmod +x ./bin/jq-${JQ_VERSION}
+endif
+
+.PHONY: list
+list: ## List all make targets
+	@$(MAKE) -pRrn : -f $(MAKEFILE_LIST) 2>/dev/null | awk -v RS= -F: '/^# File/,/^# Finished Make data base/ {if ($$1 !~ "^[#.]") {print $$1}}' | egrep -v -e '^[^[:alnum:]]' -e '^$@$$' | sort
+
+.PHONY: help
+.DEFAULT_GOAL := help
+help:
+	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}'
+
+# Variable outputting/exporting rules
+var-%: ; @echo $($*)
+varexport-%: ; @echo $*=$($*)

@@ -117,7 +117,7 @@ func (t kvTester) Test(key string) error {
 	_, err := t.Service.Get(key)
 	if err != nil {
 		if !isNotFoundError(err) {
-			return err // nolint:wrapcheck
+			return err //nolint:wrapcheck
 		}
 	}
 
@@ -234,7 +234,7 @@ func (v *vault) keyStoreNotFound(key string) (bool, error) {
 		return true, nil
 	}
 
-	return false, err // nolint:wrapcheck
+	return false, err //nolint:wrapcheck
 }
 
 func (v *vault) keyStoreSet(key string, val []byte) error {
@@ -291,12 +291,24 @@ func (v *vault) Init() error {
 		}
 	}
 
-	resp, err := v.cl.Sys().Init(&api.InitRequest{
-		SecretShares:      v.config.SecretShares,
-		SecretThreshold:   v.config.SecretThreshold,
-		RecoveryShares:    v.config.SecretShares,
-		RecoveryThreshold: v.config.SecretThreshold,
-	})
+	sealResp, err := v.cl.Sys().SealStatus()
+	if err != nil {
+		return errors.Wrap(err, "error getting seal status")
+	}
+
+	initRequest := api.InitRequest{}
+
+	switch sealResp.RecoverySeal {
+	case true:
+		initRequest.RecoveryShares = v.config.SecretShares
+		initRequest.RecoveryThreshold = v.config.SecretThreshold
+	default:
+		initRequest.SecretShares = v.config.SecretShares
+		initRequest.SecretThreshold = v.config.SecretThreshold
+	}
+
+	resp, err := v.cl.Sys().Init(&initRequest)
+
 	if err != nil {
 		return errors.Wrap(err, "error initializing vault")
 	}

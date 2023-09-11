@@ -12,6 +12,9 @@ ignored = [
   "github.com/ghodss/yaml", # MIT
   "sigs.k8s.io/yaml", # Forked from above
   "github.com/gogo/protobuf", # 3-Clause BSD
+  "logur.dev/adapter/logrus", # MIT
+  "logur.dev/logur", # MIT
+  "emperror.dev/errors", # MIT
 
   # Unsupported VCS
   "gopkg.in/fsnotify.v1",
@@ -24,14 +27,16 @@ ignored = [
   "cloud.google.com/go/storage",
 
   "gomodules.xyz/orderedmap", # MIT
+  "github.com/form3tech-oss/jwt-go", # MIT
   "gomodules.xyz/jsonpatch/v2", # Apache 2.0
   "gomodules.xyz/jsonpatch/v3", # Apache 2.0
 ]
 
 [header]
-ignorePaths = ["vendor"]
+authors = ["Banzai Cloud"]
+ignorePaths = [".direnv", ".devenv", "vendor"]
 ignoreFiles = ["zz_generated.*.go"]
-template = """// Copyright © :YEAR: Banzai Cloud
+template = """// Copyright © :YEAR: :AUTHOR:
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
