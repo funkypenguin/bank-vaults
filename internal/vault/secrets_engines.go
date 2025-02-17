@@ -17,31 +17,38 @@ package vault
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"emperror.dev/errors"
+	vaultpkg "github.com/bank-vaults/vault-sdk/vault"
 	"github.com/hashicorp/vault/api"
+	"github.com/jpillora/backoff"
 	"github.com/mitchellh/mapstructure"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
-
-	vaultpkg "github.com/banzaicloud/bank-vaults/pkg/sdk/vault"
 )
 
 func isOverwriteProhibitedError(err error) bool {
 	return strings.Contains(err.Error(), "delete them before reconfiguring")
 }
 
-// secretEnginesWihtoutNameConfig holds the secret engine types where
+// secretEnginesWithoutNameConfig holds the secret engine types where
 // the name shouldn't be part of the config path
-var secretEnginesWihtoutNameConfig = map[string]bool{
+var secretEnginesWithoutNameConfig = map[string]bool{
 	"ad":       true,
 	"alicloud": true,
 	"azure":    true,
 	"gcp":      true,
 	"gcpkms":   true,
 	"kv":       true,
+}
+
+// This object is used to easily find fields in secret engines that contain potentially templated expressions
+type secretEngineTemplatedConfig struct {
+	AllowedDomains []string               `mapstructure:"allowed_domains"`
+	Other          map[string]interface{} `mapstructure:",remain"`
 }
 
 type secretEngine struct {
@@ -54,6 +61,16 @@ type secretEngine struct {
 	PluginName    string                 `mapstructure:"plugin_name"`
 	Local         bool                   `mapstructure:"local"`
 	SealWrap      bool                   `mapstructure:"seal_wrap"`
+}
+
+func replaceAccessor(input string, mounts map[string]*api.MountOutput) string {
+	for k, v := range mounts {
+		if strings.Contains(input, fmt.Sprintf("__accessor__%s", strings.TrimRight(k, "/"))) {
+			slog.Info(fmt.Sprintf("__accessor__ field replaced in string %s by accessor %s", input, v.Accessor))
+			return strings.ReplaceAll(input, fmt.Sprintf("__accessor__%s", strings.TrimRight(k, "/")), v.Accessor)
+		}
+	}
+	return input
 }
 
 func initSecretsEnginesConfig(configs []secretEngine) []secretEngine {
@@ -70,7 +87,6 @@ func initSecretsEnginesConfig(configs []secretEngine) []secretEngine {
 
 func (se *secretEngine) getMountConfigInput() (api.MountConfigInput, error) {
 	var mountConfigInput api.MountConfigInput
-
 	if err := mapstructure.Decode(se.Config, &mountConfigInput); err != nil {
 		return mountConfigInput, errors.Wrap(err, "error parsing config for secret engine")
 	}
@@ -88,7 +104,7 @@ func (v *vault) mountExists(path string) (bool, error) {
 	if err != nil {
 		return false, errors.Wrap(err, "error reading mounts from vault")
 	}
-	logrus.Debugf("already existing mounts: %+v", mounts)
+	slog.Debug(fmt.Sprintf("already existing mounts: %+v", mounts))
 
 	return mounts[path+"/"] != nil, nil
 }
@@ -107,18 +123,18 @@ func (v *vault) rotateSecretEngineCredentials(secretEngineType, path, name, conf
 	}
 
 	if _, ok := v.rotateCache[rotatePath]; !ok {
-		logrus.Infoln("doing credential rotation at", rotatePath)
+		slog.Info(fmt.Sprintf("doing credential rotation at %s", rotatePath))
 
 		_, err := v.writeWithWarningCheck(rotatePath, nil)
 		if err != nil {
 			return errors.Wrapf(err, "error rotating credentials for '%s' config in vault", configPath)
 		}
 
-		logrus.Infoln("credential got rotated at", rotatePath)
+		slog.Info(fmt.Sprintf("credential got rotated at %s", rotatePath))
 
 		v.rotateCache[rotatePath] = true
 	} else {
-		logrus.Infoln("credentials were rotated previously for", rotatePath)
+		slog.Info(fmt.Sprintf("credentials were rotated previously for %s", rotatePath))
 	}
 
 	return nil
@@ -163,7 +179,7 @@ func (v *vault) getUnmanagedSecretsEngines(managedSecretsEngines []secretEngine)
 
 func configNeedsNoName(secretEngineType string, configOption string) bool {
 	if configOption == "config" {
-		_, ok := secretEnginesWihtoutNameConfig[secretEngineType]
+		_, ok := secretEnginesWithoutNameConfig[secretEngineType]
 		return ok
 	}
 
@@ -171,10 +187,21 @@ func configNeedsNoName(secretEngineType string, configOption string) bool {
 		return true
 	}
 
+	if secretEngineType == "transit" && configOption == "cache-config" {
+		return true
+	}
+
 	return false
 }
 
-func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) error {
+func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine, mounts map[string]*api.MountOutput) error {
+	b := &backoff.Backoff{
+		Min:    500 * time.Millisecond,
+		Max:    60 * time.Second,
+		Factor: 2,
+		Jitter: false,
+	}
+
 	for _, secretEngine := range managedSecretsEngines {
 		mountExists, err := v.mountExists(secretEngine.Path)
 		if err != nil {
@@ -198,18 +225,41 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 				SealWrap:    secretEngine.SealWrap,
 			}
 
-			logrus.Infof("adding secret engine %s (%s)", secretEngine.Path, secretEngine.Type)
-			logrus.Debugf("secret engine input %#v", mountInput)
-			err = v.cl.Sys().Mount(secretEngine.Path, &mountInput)
-			if err != nil {
-				return errors.Wrapf(err, "error mounting %s into vault", secretEngine.Path)
+			slog.Info(fmt.Sprintf("adding secret engine %s (%s)", secretEngine.Path, secretEngine.Type))
+			slog.Debug(fmt.Sprintf("secret engine input %#v", mountInput))
+			for {
+				err = v.cl.Sys().Mount(secretEngine.Path, &mountInput)
+				if err != nil {
+					d := b.Duration()
+					slog.Info(fmt.Sprintf("error mounting %s into vault: %s, waiting %s before trying again...", secretEngine.Path, err.Error(), d))
+
+					if d == b.Max {
+						// Stop retrying after reaching the max backoff time
+						return errors.Wrapf(err, "error mounting %s into vault after several attempts", secretEngine.Path)
+					}
+					time.Sleep(d)
+					continue
+				}
+				b.Reset()
+				break // if successful, break out of the loop
 			}
 		} else {
 			// If the secret engine is already mounted, only update its config in place.
-			logrus.Infof("tuning already existing secret engine %s/", secretEngine.Path)
-			err = v.cl.Sys().TuneMount(secretEngine.Path, mountConfigInput)
-			if err != nil {
-				return errors.Wrapf(err, "error tuning %s in vault", secretEngine.Path)
+			slog.Info(fmt.Sprintf("tuning already existing secret engine %s/", secretEngine.Path))
+			for {
+				err = v.cl.Sys().TuneMount(secretEngine.Path, mountConfigInput)
+				if err != nil {
+					slog.Info(fmt.Sprintf("error tuning %s: %s, waiting %s before trying again...", secretEngine.Path, err.Error(), b.Duration()))
+
+					if b.Duration() == b.Max {
+						// Stop retrying after reaching the max backoff time
+						return errors.Wrapf(err, "error mounting %s into vault after several attempts", secretEngine.Path)
+					}
+					time.Sleep(b.Duration())
+					continue
+				}
+				b.Reset()
+				break
 			}
 		}
 
@@ -219,10 +269,28 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 			if err != nil {
 				return errors.Wrap(err, "error converting config data for secret engine")
 			}
-			for _, subConfigData := range configData {
-				subConfigData, err := cast.ToStringMapE(subConfigData)
-				if err != nil {
-					return errors.Wrap(err, "error converting sub config data for secret engine")
+			for _, subConfigDataRaw := range configData {
+				var subConfigData map[string]interface{}
+
+				// If subConfigDataRaw has fields that are supported for templated policies,
+				// it will be cast successfully into secretEngineTemplatedConfig
+				var pkiRole secretEngineTemplatedConfig
+				err := mapstructure.Decode(subConfigDataRaw, &pkiRole)
+				if err == nil {
+					templatedDomains := []string{}
+					for _, domain := range pkiRole.AllowedDomains {
+						templatedDomains = append(templatedDomains, replaceAccessor(domain, mounts))
+					}
+					pkiRole.AllowedDomains = templatedDomains
+					subConfigData = pkiRole.Other
+					subConfigData["allowed_domains"] = pkiRole.AllowedDomains
+				} else {
+					// If the object could not be cast into a secretEngineTemplatedConfig,
+					// subConfigData will just be initialized from the subConfigDataRaw
+					subConfigData, err = cast.ToStringMapE(subConfigDataRaw)
+					if err != nil {
+						return errors.Wrap(err, "error converting sub config data for secret engine")
+					}
 				}
 
 				name, ok := subConfigData["name"]
@@ -234,8 +302,7 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 				// `json: unsupported type: map[interface {}]interface {}`
 				// So check and replace by `map[string]interface{}` before using it.
 				for k, v := range subConfigData {
-					switch val := v.(type) {
-					case map[interface{}]interface{}:
+					if val, ok := v.(map[interface{}]interface{}); ok {
 						subConfigData[k] = cast.ToStringMap(val)
 					}
 				}
@@ -266,7 +333,7 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 					secretExists := false
 					if configOption == "root/generate" { // the pki generate call is a different beast
 						req := v.cl.NewRequest("GET", fmt.Sprintf("/v1/%s/ca", secretEngine.Path))
-						resp, err := v.cl.RawRequestWithContext(context.Background(), req)
+						resp, err := v.cl.RawRequestWithContext(context.Background(), req) //nolint
 						if resp != nil {
 							defer resp.Body.Close()
 						}
@@ -291,7 +358,7 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 						if createOnly {
 							reason = "create_only"
 						}
-						logrus.Infof("Secret at configpath %s already exists, %s was set so this will not be updated", configPath, reason)
+						slog.Info(fmt.Sprintf("Secret at configpath %s already exists, %s was set so this will not be updated", configPath, reason))
 						shouldUpdate = false
 					}
 				}
@@ -300,7 +367,7 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 					sec, err := v.writeWithWarningCheck(configPath, subConfigData)
 					if err != nil {
 						if isOverwriteProhibitedError(err) {
-							logrus.Infoln("can't reconfigure", configPath, "please delete it manually")
+							slog.Info(fmt.Sprintf("can't reconfigure %s, please delete it manually", configPath))
 
 							continue
 						}
@@ -315,7 +382,7 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 					}
 				}
 
-				// For secret engines where the root credentials are rotatable we don't wan't to reconfigure again
+				// For secret engines where the root credentials are rotatable we don't want to reconfigure again
 				// with the old credentials, because that would cause access denied issues. Currently these are:
 				// - AWS
 				// - Database
@@ -323,7 +390,11 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 					((secretEngine.Type == "database" && configOption == "config") ||
 						(secretEngine.Type == "aws" && configOption == "config/root")) {
 					// TODO we need to find out if it was rotated or not
-					err = v.rotateSecretEngineCredentials(secretEngine.Type, secretEngine.Path, name.(string), configPath)
+					nameStr := ""
+					if name != nil {
+						nameStr = name.(string)
+					}
+					err = v.rotateSecretEngineCredentials(secretEngine.Type, secretEngine.Path, nameStr, configPath)
 					if err != nil {
 						return errors.Wrapf(err, "error rotating credentials for '%s' config in vault", configPath)
 					}
@@ -336,13 +407,13 @@ func (v *vault) addManagedSecretsEngines(managedSecretsEngines []secretEngine) e
 }
 
 func (v *vault) removeUnmanagedSecretsEngines(unmanagedSecretsEngines map[string]bool) error {
-	if len(unmanagedSecretsEngines) == 0 || !extConfig.PurgeUnmanagedConfig.Enabled ||
-		extConfig.PurgeUnmanagedConfig.Exclude.Secrets {
+	if len(unmanagedSecretsEngines) == 0 || !v.externalConfig.PurgeUnmanagedConfig.Enabled ||
+		v.externalConfig.PurgeUnmanagedConfig.Exclude.Secrets {
 		return nil
 	}
 
 	for secretEnginePath := range unmanagedSecretsEngines {
-		logrus.Infof("removing secret engine path %s ", secretEnginePath)
+		slog.Info(fmt.Sprintf("removing secret engine path %s ", secretEnginePath))
 		if err := v.cl.Sys().Unmount(secretEnginePath); err != nil {
 			return errors.Wrapf(err, "error unmounting %s secret engine from vault", secretEnginePath)
 		}
@@ -352,10 +423,14 @@ func (v *vault) removeUnmanagedSecretsEngines(unmanagedSecretsEngines map[string
 }
 
 func (v *vault) configureSecretsEngines() error {
-	managedSecretsEngines := initSecretsEnginesConfig(extConfig.Secrets)
+	auths, err := v.cl.Sys().ListAuth()
+	if err != nil {
+		return errors.Wrap(err, "error while getting list of auth engines for secret engine configuration")
+	}
+	managedSecretsEngines := initSecretsEnginesConfig(v.externalConfig.Secrets)
 	unmanagedSecretsEngines := v.getUnmanagedSecretsEngines(managedSecretsEngines)
 
-	if err := v.addManagedSecretsEngines(managedSecretsEngines); err != nil {
+	if err := v.addManagedSecretsEngines(managedSecretsEngines, auths); err != nil {
 		return errors.Wrap(err, "error adding secrets engines")
 	}
 

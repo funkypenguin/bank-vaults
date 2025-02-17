@@ -16,13 +16,13 @@ package vault
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"emperror.dev/errors"
 	"github.com/hashicorp/hcl"
 	hclPrinter "github.com/hashicorp/hcl/hcl/printer"
 	"github.com/hashicorp/vault/api"
-	"github.com/sirupsen/logrus"
 )
 
 type policy struct {
@@ -34,7 +34,7 @@ type policy struct {
 func initPoliciesConfig(policiesConfig []policy, mounts map[string]*api.MountOutput) ([]policy, error) {
 	for index, policy := range policiesConfig {
 		for k, v := range mounts {
-			policy.Rules = strings.Replace(policy.Rules, fmt.Sprintf("__accessor__%s", strings.TrimRight(k, "/")), v.Accessor, -1)
+			policy.Rules = strings.ReplaceAll(policy.Rules, fmt.Sprintf("__accessor__%s", strings.TrimRight(k, "/")), v.Accessor)
 		}
 		//
 		// Format HCL polices.
@@ -47,8 +47,8 @@ func initPoliciesConfig(policiesConfig []policy, mounts map[string]*api.MountOut
 
 			// Policies are parsable but couldn't be HCL formatted (most likely JSON).
 			rulesFormatted = []byte(policy.Rules)
-			logrus.Debugf("error HCL-formatting %s policy rules (ignore if rules are JSON-formatted): %s",
-				policy.Name, err.Error())
+			slog.Debug(fmt.Sprintf("error HCL-formatting %s policy rules (ignore if rules are JSON-formatted): %s",
+				policy.Name, err.Error()))
 		}
 		policiesConfig[index].RulesFormatted = string(rulesFormatted)
 	}
@@ -58,7 +58,7 @@ func initPoliciesConfig(policiesConfig []policy, mounts map[string]*api.MountOut
 
 func (v *vault) addManagedPolicies(managedPolicies []policy) error {
 	for _, policy := range managedPolicies {
-		logrus.Infof("adding policy %s", policy.Name)
+		slog.Info(fmt.Sprintf("adding policy %s", policy.Name))
 		if err := v.cl.Sys().PutPolicy(policy.Name, policy.RulesFormatted); err != nil {
 			return errors.Wrapf(err, "error putting %s policy into vault", policy.Name)
 		}
@@ -101,14 +101,14 @@ func (v *vault) getUnmanagedPolicies(managedPolicies []policy) map[string]bool {
 }
 
 func (v *vault) removeUnmanagedPolicies(managedPolicies []policy) error {
-	if !extConfig.PurgeUnmanagedConfig.Enabled || extConfig.PurgeUnmanagedConfig.Exclude.Policies {
-		logrus.Debugf("purge config is disabled, no unmanaged policies will be removed")
+	if !v.externalConfig.PurgeUnmanagedConfig.Enabled || v.externalConfig.PurgeUnmanagedConfig.Exclude.Policies {
+		slog.Debug("purge config is disabled, no unmanaged policies will be removed")
 		return nil
 	}
 
 	unmanagedPolicies := v.getUnmanagedPolicies(managedPolicies)
 	for policyName := range unmanagedPolicies {
-		logrus.Infof("removing policy %s", policyName)
+		slog.Info(fmt.Sprintf("removing policy %s", policyName))
 		if err := v.cl.Sys().DeletePolicy(policyName); err != nil {
 			return errors.Wrapf(err, "error deleting %s policy from vault", policyName)
 		}
@@ -121,7 +121,8 @@ func (v *vault) configurePolicies() error {
 	if err != nil {
 		return errors.Wrap(err, "error while getting list of auth engines")
 	}
-	managedPolicies, err := initPoliciesConfig(extConfig.Policies, auths)
+
+	managedPolicies, err := initPoliciesConfig(v.externalConfig.Policies, auths)
 	if err != nil {
 		return errors.Wrap(err, "error while initializing policies config")
 	}

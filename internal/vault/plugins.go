@@ -15,10 +15,11 @@
 package vault
 
 import (
+	"fmt"
+	"log/slog"
+
 	"emperror.dev/errors"
 	"github.com/hashicorp/vault/api"
-	"github.com/hashicorp/vault/sdk/helper/consts"
-	"github.com/sirupsen/logrus"
 )
 
 // A non-exclusive map of Vault builtin plugins to avoid calling Vault API for each plugin.
@@ -71,13 +72,13 @@ func (v *vault) getExistingPlugins() (map[string]map[string]bool, error) {
 			if !builtinPlugins[existingPluginType.String()][existingPluginName] {
 				// Since the builtinPlugins map is non-exclusive, we still need to make sure that the existing plugin
 				// is not builtin plugin (for example, if Vault got some more builtin plugins).
-				// Hopfully that should be replaced when Vault exposes the builtin plugins only via the API.
+				// Hopefully that should be replaced when Vault exposes the builtin plugins only via the API.
 				input := api.GetPluginInput{
 					Name: existingPluginName,
 					Type: existingPluginType,
 				}
 
-				logrus.Debugf("check if %s/%s is a builtin plugin or not", existingPluginType, existingPluginName)
+				slog.Debug(fmt.Sprintf("check if %s/%s is a builtin plugin or not", existingPluginType, existingPluginName))
 				existingPlugin, err := v.cl.Sys().GetPlugin(&input)
 				if err != nil {
 					return nil, errors.Wrapf(err, "failed to retrieve plugin %s/%s", existingPluginType, existingPluginName)
@@ -94,9 +95,7 @@ func (v *vault) getExistingPlugins() (map[string]map[string]bool, error) {
 
 // getUnmanagedPlugins gets unmanaged plugins by comparing what's already in Vault
 // and what's in the externalConfig.
-func getUnmanagedPlugins(
-	existingPlugins map[string]map[string]bool, managedPlugins []plugin,
-) map[string]map[string]bool {
+func getUnmanagedPlugins(existingPlugins map[string]map[string]bool, managedPlugins []plugin) map[string]map[string]bool {
 	for _, managedPlugin := range managedPlugins {
 		delete(existingPlugins[managedPlugin.Type], managedPlugin.Name)
 	}
@@ -106,7 +105,7 @@ func getUnmanagedPlugins(
 
 func (v *vault) addManagedPlugins(managedPlugins []plugin) error {
 	for _, plugin := range managedPlugins {
-		pluginType, err := consts.ParsePluginType(plugin.Type)
+		pluginType, err := api.ParsePluginType(plugin.Type)
 		if err != nil {
 			return errors.Wrap(err, "error parsing type for plugin")
 		}
@@ -118,8 +117,8 @@ func (v *vault) addManagedPlugins(managedPlugins []plugin) error {
 			Type:    pluginType,
 		}
 
-		logrus.Infof("adding plugin %s (%s)", plugin.Name, plugin.Type)
-		logrus.Debugf("plugin input %#v", input)
+		slog.Info(fmt.Sprintf("adding plugin %s (%s)", plugin.Name, plugin.Type))
+		slog.Debug(fmt.Sprintf("plugin input %#v", input))
 		if err = v.cl.Sys().RegisterPlugin(&input); err != nil {
 			return errors.Wrapf(err, "error adding plugin %s/%s in vault", plugin.Type, plugin.Name)
 		}
@@ -129,8 +128,8 @@ func (v *vault) addManagedPlugins(managedPlugins []plugin) error {
 }
 
 func (v *vault) removeUnmanagedPlugins(managedPlugins []plugin) error {
-	if !extConfig.PurgeUnmanagedConfig.Enabled || extConfig.PurgeUnmanagedConfig.Exclude.Plugins {
-		logrus.Debugf("purge config is disabled, no unmanaged plugins will be removed")
+	if !v.externalConfig.PurgeUnmanagedConfig.Enabled || v.externalConfig.PurgeUnmanagedConfig.Exclude.Plugins {
+		slog.Debug("purge config is disabled, no unmanaged plugins will be removed")
 		return nil
 	}
 
@@ -139,7 +138,7 @@ func (v *vault) removeUnmanagedPlugins(managedPlugins []plugin) error {
 
 	for existingPluginType, existingPluginNames := range unmanagedPlugins {
 		for existingPluginName := range existingPluginNames {
-			pluginType, err := consts.ParsePluginType(existingPluginType)
+			pluginType, err := api.ParsePluginType(existingPluginType)
 			if err != nil {
 				return errors.Wrap(err, "error parsing type for plugin")
 			}
@@ -149,7 +148,7 @@ func (v *vault) removeUnmanagedPlugins(managedPlugins []plugin) error {
 				Type: pluginType,
 			}
 
-			logrus.Infof("removing plugin %s (%s)", existingPluginName, existingPluginType)
+			slog.Info(fmt.Sprintf("removing plugin %s (%s)", existingPluginName, existingPluginType))
 			if err := v.cl.Sys().DeregisterPlugin(&input); err != nil {
 				return errors.Wrapf(err, "error removing plugin %s/%s in vault", existingPluginType, existingPluginName)
 			}
@@ -160,7 +159,7 @@ func (v *vault) removeUnmanagedPlugins(managedPlugins []plugin) error {
 }
 
 func (v *vault) configurePlugins() error {
-	managedPlugins := extConfig.Plugins
+	managedPlugins := v.externalConfig.Plugins
 
 	if err := v.addManagedPlugins(managedPlugins); err != nil {
 		return errors.Wrap(err, "error while adding plugins")

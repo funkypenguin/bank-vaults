@@ -16,16 +16,13 @@ package vault
 
 import (
 	"fmt"
-	"io/ioutil"
+	"log/slog"
 	"os"
 	"strings"
 
 	"emperror.dev/errors"
-	"github.com/cristalhq/jwt/v3"
 	"github.com/hashicorp/vault/api"
-	json "github.com/json-iterator/go"
 	"github.com/mitchellh/mapstructure"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
 )
 
@@ -52,11 +49,10 @@ func initAuthConfig(auths []auth) []auth {
 
 		// Convert `map[interface{}]interface{}` to `map[string]interface{}` before sending the config to Vault API.
 		// That's because the config data can have a sub dict (like `provider_config` in JWT/OIDC).
-		// Without this conversion, Vault API will retrun the following error:
+		// Without this conversion, Vault API will return the following error:
 		// `json: unsupported type: map[interface {}]interface {}`
 		for key, value := range auths[index].Config {
-			switch val := value.(type) {
-			case map[interface{}]interface{}:
+			if val, ok := value.(map[interface{}]interface{}); ok {
 				auths[index].Config[key] = cast.ToStringMap(val)
 			}
 		}
@@ -68,104 +64,119 @@ func initAuthConfig(auths []auth) []auth {
 func (v *vault) addAdditionalAuthConfig(authMethod auth) error {
 	switch authMethod.Type {
 	case "kubernetes":
-		config := authMethod.Config
 		if authMethod.Config == nil {
 			authMethod.Config = map[string]interface{}{}
 		}
+		config := authMethod.Config
 
-		// If kubernetes_host is defined we are probably out of cluster, so don't read the default config
 		if _, ok := config["kubernetes_host"]; !ok {
-			defaultConfig, err := v.kubernetesAuthConfigDefault()
-			if err != nil {
-				return errors.Wrap(err, "error getting default kubernetes auth config for vault")
-			}
-			// merge the config blocks
-			for k, v := range config {
-				defaultConfig[k] = v
-			}
-			config = defaultConfig
+			config["kubernetes_host"] = fmt.Sprint("https://", os.Getenv("KUBERNETES_SERVICE_HOST"))
 		}
 		err := v.configureGenericAuthConfig(authMethod.Type, authMethod.Path, config)
 		if err != nil {
 			return errors.Wrap(err, "error configuring kubernetes auth for vault")
 		}
+
 		err = v.configureGenericAuthRoles(authMethod.Type, authMethod.Path, "role", authMethod.Roles)
 		if err != nil {
 			return errors.Wrap(err, "error configuring kubernetes auth roles for vault")
 		}
+
 	case "github":
 		err := v.configureGenericAuthConfig(authMethod.Type, authMethod.Path, authMethod.Config)
 		if err != nil {
 			return errors.Wrap(err, "error configuring github auth for vault")
 		}
+
 		mappings, err := cast.ToStringMapE(authMethod.Map)
 		if err != nil {
 			return errors.Wrap(err, "error finding map block for github")
 		}
+
 		err = v.configureGithubMappings(authMethod.Path, mappings)
 		if err != nil {
 			return errors.Wrap(err, "error configuring github mappings for vault")
 		}
+
+	case "plugin":
+		err := v.configureGenericAuthRoles(authMethod.Type, authMethod.Path, "role", authMethod.Roles)
+		if err != nil {
+			return errors.Wrap(err, "error configuring plugin auth roles for vault")
+		}
+
 	case "aws":
 		err := v.configureAwsConfig(authMethod.Path, authMethod.Config)
 		if err != nil {
 			return errors.Wrap(err, "error configuring aws auth for vault")
 		}
+
 		if authMethod.Crossaccountrole != nil {
 			err = v.configureAWSCrossAccountRoles(authMethod.Path, authMethod.Crossaccountrole)
 			if err != nil {
 				return errors.Wrap(err, "error configuring aws auth cross account roles for vault")
 			}
 		}
+
 		err = v.configureGenericAuthRoles(authMethod.Type, authMethod.Path, "role", authMethod.Roles)
 		if err != nil {
 			return errors.Wrap(err, "error configuring aws auth roles for vault")
 		}
+
 	case "gcp", "oci":
 		err := v.configureGenericAuthConfig(authMethod.Type, authMethod.Path, authMethod.Config)
 		if err != nil {
 			return errors.Wrapf(err, "error configuring %s auth for vault", authMethod.Type)
 		}
+
 		err = v.configureGenericAuthRoles(authMethod.Type, authMethod.Path, "role", authMethod.Roles)
 		if err != nil {
 			return errors.Wrapf(err, "error configuring %s auth roles for vault", authMethod.Type)
 		}
+
 	case "approle":
 		err := v.configureGenericAuthRoles(authMethod.Type, authMethod.Path, "role", authMethod.Roles)
 		if err != nil {
 			return errors.Wrap(err, "error configuring approle auth for vault")
 		}
+
 	case "jwt", "oidc":
 		err := v.configureGenericAuthConfig(authMethod.Type, authMethod.Path, authMethod.Config)
 		if err != nil {
 			return errors.Wrapf(err, "error configuring %s auth on path %s for vault", authMethod.Type, authMethod.Path)
 		}
+
 		roles, err := cast.ToSliceE(authMethod.Roles)
 		if err != nil {
 			return errors.Wrapf(err, "error finding roles block for %s", authMethod.Type)
 		}
+
 		err = v.configureJwtRoles(authMethod.Path, roles)
 		if err != nil {
 			return errors.Wrapf(err, "error configuring %s roles on path %s for vault", authMethod.Type, authMethod.Path)
 		}
+
 	case "token":
 		err := v.configureGenericAuthRoles(authMethod.Type, "token", "roles", authMethod.Roles)
 		if err != nil {
 			return errors.Wrap(err, "error configuring token roles for vault")
 		}
+
 	case "cert":
 		err := v.configureGenericAuthConfig(authMethod.Type, authMethod.Path, authMethod.Config)
 		if err != nil {
 			return errors.Wrap(err, "error configuring cert auth for vault")
 		}
+
 		roles, err := cast.ToSliceE(authMethod.Roles)
 		if err != nil {
 			return errors.Wrap(err, "error finding roles block for certs")
 		}
+
 		err = v.configureGenericAuthRoles(authMethod.Type, authMethod.Path, "certs", roles)
 		if err != nil {
 			return errors.Wrap(err, "error configuring certs auth roles for vault")
 		}
+
 	case "ldap", "okta":
 		err := v.configureGenericAuthConfig(authMethod.Type, authMethod.Path, authMethod.Config)
 		if err != nil {
@@ -188,16 +199,19 @@ func (v *vault) addAdditionalAuthConfig(authMethod auth) error {
 				return errors.Wrapf(err, "error configuring %s %s for vault", authMethod.Type, "groups")
 			}
 		}
+
 	case "userpass":
 		err := v.configureUserpassUsers(authMethod.Path, authMethod.Users)
 		if err != nil {
 			return errors.Wrapf(err, "error configuring users for userpass in vault")
 		}
+
 	case "azure":
 		err := v.configureGenericAuthConfig(authMethod.Type, authMethod.Path, authMethod.Config)
 		if err != nil {
 			return errors.Wrap(err, "error configuring azure auth for vault")
 		}
+
 		err = v.configureGenericAuthRoles(authMethod.Type, authMethod.Path, "role", authMethod.Roles)
 		if err != nil {
 			return errors.Wrap(err, "error configuring azure auth roles for vault")
@@ -207,41 +221,13 @@ func (v *vault) addAdditionalAuthConfig(authMethod auth) error {
 	return nil
 }
 
-func (v *vault) kubernetesAuthConfigDefault() (map[string]interface{}, error) {
-	kubernetesCACert, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
-	if err != nil {
-		return nil, errors.WrapIf(err, "failed to read ca.crt")
-	}
-	tokenReviewerJWT, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
-	if err != nil {
-		return nil, errors.WrapIf(err, "failed to read serviceaccount token")
-	}
-	token, err := jwt.Parse(tokenReviewerJWT)
-	if err != nil {
-		return nil, errors.WrapIf(err, "failed to parse serviceaccount token")
-	}
-	var claims jwt.StandardClaims
-	err = json.Unmarshal(token.RawClaims(), &claims)
-	if err != nil {
-		return nil, errors.WrapIf(err, "failed to get serviceaccount token claims")
-	}
-
-	config := map[string]interface{}{
-		"kubernetes_host":    fmt.Sprint("https://", os.Getenv("KUBERNETES_SERVICE_HOST")),
-		"kubernetes_ca_cert": string(kubernetesCACert),
-		"token_reviewer_jwt": string(tokenReviewerJWT),
-		"issuer":             claims.Issuer,
-	}
-
-	return config, nil
-}
-
 func (v *vault) configureGithubMappings(path string, mappings map[string]interface{}) error {
 	for mappingType, mapping := range mappings {
 		mapping, err := cast.ToStringMapStringE(mapping)
 		if err != nil {
 			return errors.Wrap(err, "error converting mapping for github")
 		}
+
 		for userOrTeam, policy := range mapping {
 			_, err := v.writeWithWarningCheck(fmt.Sprintf("auth/%s/map/%s/%s", path, mappingType, userOrTeam), map[string]interface{}{"value": policy})
 			if err != nil {
@@ -257,6 +243,16 @@ func (v *vault) configureAwsConfig(path string, config map[string]interface{}) e
 	_, err := v.writeWithWarningCheck(fmt.Sprintf("auth/%s/config/client", path), config)
 	if err != nil {
 		return errors.Wrap(err, "error putting aws config into vault")
+	}
+
+	return nil
+}
+
+func (v *vault) configureAwsIdentityIntegration(path string, config map[string]interface{}) error {
+	// https://developer.hashicorp.com/vault/api-docs/auth/aws#configure-identity-integration
+	_, err := v.writeWithWarningCheck(fmt.Sprintf("auth/%s/config/identity", path), config)
+	if err != nil {
+		return errors.Wrap(err, "error configuring aws identity integration into vault")
 	}
 
 	return nil
@@ -287,7 +283,6 @@ func (v *vault) configureAWSCrossAccountRoles(path string, crossAccountRoles []i
 		}
 
 		stsAccount := fmt.Sprint(crossAccountRole["sts_account"])
-
 		_, err = v.writeWithWarningCheck(fmt.Sprintf("auth/%s/config/sts/%s", path, stsAccount), crossAccountRole)
 		if err != nil {
 			return errors.Wrapf(err, "error putting %s cross account aws role into vault", stsAccount)
@@ -304,7 +299,8 @@ func (v *vault) configureJwtRoles(path string, roles []interface{}) error {
 		if err != nil {
 			return errors.Wrap(err, "error converting roles for jwt")
 		}
-		// role can have have a bound_claims or claim_mappings child dict. But it will cause:
+
+		// role can have a bound_claims or claim_mappings child dict. But it will cause:
 		// `json: unsupported type: map[interface {}]interface {}`
 		// So check and replace by `map[string]interface{}` before using it.
 		if val, ok := role["bound_claims"]; ok {
@@ -329,11 +325,13 @@ func (v *vault) configureGenericUserAndGroupMappings(method, path string, mappin
 		if err != nil {
 			return errors.Wrapf(err, "error converting mapping for %s", method)
 		}
+
 		_, err = v.writeWithWarningCheck(fmt.Sprintf("auth/%s/%s/%s", path, mappingType, userOrGroup), mapping)
 		if err != nil {
 			return errors.Wrapf(err, "error putting %s %s mapping into vault", method, mappingType)
 		}
 	}
+
 	return nil
 }
 
@@ -349,6 +347,7 @@ func (v *vault) configureGenericAuthConfig(method, path string, config map[strin
 	if err != nil {
 		return errors.Wrapf(err, "error putting %s auth config into vault", method)
 	}
+
 	return nil
 }
 
@@ -395,6 +394,7 @@ func (v *vault) addManagedAuthMethods(managedAuths []auth) error {
 			if err != nil {
 				return errors.Wrap(err, "error parsing auth method options")
 			}
+
 			options = api.EnableAuthOptions{
 				Type:        authMethod.Type,
 				Description: description,
@@ -409,7 +409,7 @@ func (v *vault) addManagedAuthMethods(managedAuths []auth) error {
 
 		// We have to filter all existing auths, not to re-enable them as that would raise an error
 		if existingAuths[authMethod.Path] == nil {
-			logrus.Infof("adding auth method %s (%s)", authMethod.Path, authMethod.Type)
+			slog.Info(fmt.Sprintf("adding auth method %s (%s)", authMethod.Path, authMethod.Type))
 			err := v.cl.Sys().EnableAuthWithOptions(authMethod.Path, &options)
 			if err != nil {
 				return errors.Wrapf(err, "error enabling %s auth method in vault", authMethod.Path)
@@ -418,7 +418,7 @@ func (v *vault) addManagedAuthMethods(managedAuths []auth) error {
 
 		// If auth method exists but has additional mount options
 		if hasMountOptions {
-			logrus.Infof("tuning existing auth %s (%s)", authMethod.Path, authMethod.Type)
+			slog.Info(fmt.Sprintf("tuning existing auth %s (%s)", authMethod.Path, authMethod.Type))
 			// all auth methods are mounted below auth/
 			tunePath := fmt.Sprintf("auth/%s", authMethod.Path)
 			err := v.cl.Sys().TuneMount(tunePath, authConfigInput)
@@ -426,9 +426,33 @@ func (v *vault) addManagedAuthMethods(managedAuths []auth) error {
 				return errors.Wrapf(err, "error tuning %s (%s) auth method in vault", authMethod.Path, authMethod.Type)
 			}
 		}
+
 		err := v.addAdditionalAuthConfig(authMethod)
 		if err != nil {
 			return errors.Wrapf(err, "error while adding auth method config")
+		}
+
+		// This configuration only makes sense if authentication is done against AWS
+		// However, AWS authentication can be configured using an "aws" or "plugin" backend.
+		// Since it's not specific for only one backend type,
+		// this code lives in this function rather than in addAdditionalAuthConfig
+		if authMethod.Config != nil {
+			for configOption, configDataRaw := range authMethod.Config {
+				slog.Debug(fmt.Sprintf("Handling auth method config option: %s", configOption))
+				switch configOption {
+				case "aws-identity-integration":
+					configData, err := cast.ToStringMapE(configDataRaw)
+					if err != nil {
+						return errors.Wrap(err, "error converting configDataRaw for aws-identity-integration configuration")
+					}
+					err = v.configureAwsIdentityIntegration(authMethod.Path, configData)
+					if err != nil {
+						return errors.Wrap(err, "error configuring plugin identity integration")
+					}
+				default:
+					return errors.Wrap(err, "Unmanaged configuration option")
+				}
+			}
 		}
 	}
 
@@ -469,22 +493,23 @@ func (v *vault) getUnmanagedAuthMethods(managedAuthMethods []auth) map[string]*a
 
 // Disables any auth method that's not managed if purgeUnmanagedConfig option is enabled
 func (v *vault) removeUnmanagedAuthMethods(unmanagedAuths map[string]*api.MountOutput) error {
-	if len(unmanagedAuths) == 0 || !extConfig.PurgeUnmanagedConfig.Enabled || extConfig.PurgeUnmanagedConfig.Exclude.Auth {
+	if len(unmanagedAuths) == 0 || !v.externalConfig.PurgeUnmanagedConfig.Enabled || v.externalConfig.PurgeUnmanagedConfig.Exclude.Auth {
 		return nil
 	}
 
 	for authMethod := range unmanagedAuths {
-		logrus.Infof("removing auth method %s ", authMethod)
+		slog.Info(fmt.Sprintf("removing auth method %s ", authMethod))
 		err := v.cl.Sys().DisableAuth(authMethod)
 		if err != nil {
 			return errors.Wrapf(err, "error disabling %s auth method in vault", authMethod)
 		}
 	}
+
 	return nil
 }
 
 func (v *vault) configureAuthMethods() error {
-	managedAuths := initAuthConfig(extConfig.Auth)
+	managedAuths := initAuthConfig(v.externalConfig.Auth)
 	unmanagedAuths := v.getUnmanagedAuthMethods(managedAuths)
 
 	if err := v.addManagedAuthMethods(managedAuths); err != nil {

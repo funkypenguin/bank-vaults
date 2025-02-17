@@ -15,11 +15,14 @@
 package main
 
 import (
-	"github.com/sirupsen/logrus"
+	"fmt"
+	"log/slog"
+	"os"
+
+	"github.com/bank-vaults/vault-sdk/vault"
 	"github.com/spf13/cobra"
 
-	internalVault "github.com/banzaicloud/bank-vaults/internal/vault"
-	"github.com/banzaicloud/bank-vaults/pkg/sdk/vault"
+	internalVault "github.com/bank-vaults/bank-vaults/internal/vault"
 )
 
 const (
@@ -30,30 +33,34 @@ const (
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialise the target Vault instance",
+	Short: "Initialize the target Vault instance",
 	Long: `This command will verify the backend service is accessible, then
 run "vault init" against the target Vault instance, before encrypting and
 storing the keys in the given backend.
 
-It will not unseal the Vault instance after initialising.`,
-	Run: func(cmd *cobra.Command, args []string) {
+It will not unseal the Vault instance after initializing.`,
+	Run: func(_ *cobra.Command, _ []string) {
 		store, err := kvStoreForConfig(c)
 		if err != nil {
-			logrus.Fatalf("error creating kv store: %s", err.Error())
+			slog.Error(fmt.Sprintf("error creating kv store: %s", err.Error()))
+			os.Exit(1)
 		}
 
 		cl, err := vault.NewRawClient()
 		if err != nil {
-			logrus.Fatalf("error connecting to vault: %s", err.Error())
+			slog.Error(fmt.Sprintf("error connecting to vault: %s", err.Error()))
+			os.Exit(1)
 		}
 
 		v, err := internalVault.New(store, cl, vaultConfigForConfig(c))
 		if err != nil {
-			logrus.Fatalf("error creating vault helper: %s", err.Error())
+			slog.Error(fmt.Sprintf("error creating vault helper: %s", err.Error()))
+			os.Exit(1)
 		}
 
 		if err = v.Init(); err != nil {
-			logrus.Fatalf("error initialising vault: %s", err.Error())
+			slog.Error(fmt.Sprintf("error initializing vault: %s", err.Error()))
+			os.Exit(1)
 		}
 	},
 }

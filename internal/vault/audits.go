@@ -15,12 +15,13 @@
 package vault
 
 import (
+	"fmt"
+	"log/slog"
 	"strings"
 
 	"emperror.dev/errors"
 	"github.com/hashicorp/vault/api"
 	"github.com/mitchellh/mapstructure"
-	"github.com/sirupsen/logrus"
 )
 
 type audit struct {
@@ -51,7 +52,7 @@ func (v *vault) getExistingAudits() (map[string]bool, error) {
 		return nil, errors.Wrapf(err, "unable to list existing audits")
 	}
 
-	logrus.Debugf("already existing audit devices: %#v", existingAuditsList)
+	slog.Debug(fmt.Sprintf("already existing audit devices: %#v", existingAuditsList))
 
 	for existingAuditPath := range existingAuditsList {
 		existingAudits[strings.Trim(existingAuditPath, "/")] = true
@@ -76,7 +77,7 @@ func (v *vault) addManagedAudits(managedAudits []audit) error {
 
 	for _, auditDevice := range managedAudits {
 		if existingAudits[auditDevice.Path] {
-			logrus.Infof("audit device is already mounted %s/", auditDevice.Path)
+			slog.Info(fmt.Sprintf("audit device is already mounted %s/", auditDevice.Path))
 		} else {
 			var options api.EnableAuditOptions
 			err := mapstructure.Decode(auditDevice, &options)
@@ -84,8 +85,8 @@ func (v *vault) addManagedAudits(managedAudits []audit) error {
 				return errors.Wrap(err, "error parsing audit options")
 			}
 
-			logrus.Infof("adding audit device %s (%s)", auditDevice.Path, auditDevice.Type)
-			logrus.Debugf("audit device options %#v", options)
+			slog.Info(fmt.Sprintf("adding audit device %s (%s)", auditDevice.Path, auditDevice.Type))
+			slog.Debug(fmt.Sprintf("audit device options %#v", options))
 			err = v.cl.Sys().EnableAuditWithOptions(auditDevice.Path+"/", &options)
 			if err != nil {
 				return errors.Wrapf(err, "error enabling audit device %s in vault", auditDevice.Path)
@@ -98,12 +99,12 @@ func (v *vault) addManagedAudits(managedAudits []audit) error {
 
 // Disables any audit that's not managed if purgeUnmanagedConfig option is enabled, otherwise it leaves them
 func (v *vault) removeUnmanagedAudits(unmanagedAudits map[string]bool) error {
-	if len(unmanagedAudits) == 0 || !extConfig.PurgeUnmanagedConfig.Enabled || extConfig.PurgeUnmanagedConfig.Exclude.Audit {
+	if len(unmanagedAudits) == 0 || !v.externalConfig.PurgeUnmanagedConfig.Enabled || v.externalConfig.PurgeUnmanagedConfig.Exclude.Audit {
 		return nil
 	}
 
 	for auditPath := range unmanagedAudits {
-		logrus.Infof("removing unmanged audit device %s", auditPath)
+		slog.Info(fmt.Sprintf("removing unmanaged audit device %s", auditPath))
 		err := v.cl.Sys().DisableAudit(auditPath)
 		if err != nil {
 			return errors.Wrapf(err, "error disabling %s audit in vault", auditPath)
@@ -113,14 +114,12 @@ func (v *vault) removeUnmanagedAudits(unmanagedAudits map[string]bool) error {
 }
 
 func (v *vault) configureAuditDevices() error {
-	managedAudits := initAuditConfig(extConfig.Audit)
-	unmanagedAudits := v.getUnmanagedAudits(managedAudits)
-
+	managedAudits := initAuditConfig(v.externalConfig.Audit)
 	if err := v.addManagedAudits(managedAudits); err != nil {
 		return errors.Wrap(err, "error configuring managed audits")
 	}
 
-	if err := v.removeUnmanagedAudits(unmanagedAudits); err != nil {
+	if err := v.removeUnmanagedAudits(v.getUnmanagedAudits(managedAudits)); err != nil {
 		return errors.Wrap(err, "error while disabling unmanaged auth methods")
 	}
 

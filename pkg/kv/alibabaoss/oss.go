@@ -17,12 +17,13 @@ package alibabaoss
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"net/http"
 
 	"emperror.dev/errors"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 
-	"github.com/banzaicloud/bank-vaults/pkg/kv"
+	"github.com/bank-vaults/bank-vaults/pkg/kv"
 )
 
 type ossStorage struct {
@@ -67,14 +68,14 @@ func (o *ossStorage) Get(key string) ([]byte, error) {
 	body, err := bucket.GetObject(objectKey)
 	if err != nil {
 		var serviceErr oss.ServiceError
-		if errors.As(err, &serviceErr) && serviceErr.StatusCode == 404 && serviceErr.Code == "NoSuchKey" {
+		if errors.As(err, &serviceErr) && serviceErr.StatusCode == http.StatusNotFound && serviceErr.Code == "NoSuchKey" {
 			return nil, kv.NewNotFoundError("error getting object for key '%s': %s", objectKey, err.Error())
 		}
 
 		return nil, errors.Wrapf(err, "error getting object for key '%s'", objectKey)
 	}
 
-	b, err := ioutil.ReadAll(body)
+	b, err := io.ReadAll(body)
 	defer body.Close()
 
 	if err != nil {

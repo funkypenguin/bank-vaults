@@ -20,21 +20,23 @@ import (
 	"emperror.dev/errors"
 	"github.com/spf13/viper"
 
-	internalVault "github.com/banzaicloud/bank-vaults/internal/vault"
-	"github.com/banzaicloud/bank-vaults/pkg/kv"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/alibabakms"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/alibabaoss"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/awskms"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/azurekv"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/dev"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/file"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/gckms"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/gcs"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/hsm"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/k8s"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/multi"
-	"github.com/banzaicloud/bank-vaults/pkg/kv/s3"
-	kvvault "github.com/banzaicloud/bank-vaults/pkg/kv/vault"
+	internalVault "github.com/bank-vaults/bank-vaults/internal/vault"
+	"github.com/bank-vaults/bank-vaults/pkg/kv"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/alibabakms"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/alibabaoss"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/awskms"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/azurekv"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/dev"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/file"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/gckms"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/gcs"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/hsm"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/k8s"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/multi"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/oci"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/ocikms"
+	"github.com/bank-vaults/bank-vaults/pkg/kv/s3"
+	kvvault "github.com/bank-vaults/bank-vaults/pkg/kv/vault"
 )
 
 func vaultConfigForConfig(c *viper.Viper) internalVault.Config {
@@ -107,6 +109,7 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 		s3SSEAlgos := cfg.GetStringSlice(cfgAWS3SSEAlgo)
 		kmsRegions := cfg.GetStringSlice(cfgAWSKMSRegion)
 		kmsKeyIDs := cfg.GetStringSlice(cfgAWSKMSKeyID)
+		kmsKeyEncryptionContext := cfg.GetStringMapString(cfgAWSKMSEncryptionContext)
 
 		// Try to use the standard AWS region
 		// setting if not provided for KMS/S3
@@ -146,7 +149,7 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 			return nil, errors.Errorf("you have specified one or more incorrect SSE algorithms: %v", s3SSEAlgos)
 		}
 
-		for i := 0; i < len(s3Buckets); i++ {
+		for i := range len(s3Buckets) {
 			var kmsKeyID string
 			if s3SSEAlgos[i] == awskms.SseKMS {
 				kmsKeyID = kmsKeyIDs[i]
@@ -163,8 +166,9 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 			if err != nil {
 				return nil, errors.Wrap(err, "error creating AWS S3 kv store")
 			}
+
 			if s3SSEAlgos[i] == "" {
-				kmsService, err := awskms.New(s3Service, kmsRegions[i], kmsKeyIDs[i])
+				kmsService, err := awskms.New(s3Service, kmsRegions[i], kmsKeyIDs[i], kmsKeyEncryptionContext)
 				if err != nil {
 					return nil, errors.Wrap(err, "error creating AWS KMS kv store")
 				}
@@ -183,6 +187,26 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 		}
 
 		return akv, nil
+
+	case cfgModeValueOCI:
+		ociOs, err := oci.New(
+			cfg.GetString(cfgOciBucketNamespace),
+			cfg.GetString(cfgOciBucketName),
+			cfg.GetString(cfgOciBucketPrefix),
+		)
+		if err != nil {
+			return nil, errors.Wrap(err, "error creating oracle object storage kv store")
+		}
+
+		ociKms, err := ocikms.New(ociOs,
+			cfg.GetString(cfgOciKeyOCID),
+			cfg.GetString(cfgOciCryptographicEndpoint),
+		)
+		if err != nil {
+			return nil, errors.Wrap(err, "error creating oracle kms kv store")
+		}
+
+		return ociKms, nil
 
 	case cfgModeValueAlibabaKMSOSS:
 		accessKeyID := cfg.GetString(cfgAlibabaAccessKeyID)
@@ -239,7 +263,7 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 		k8s, err := k8s.New(
 			cfg.GetString(cfgK8SNamespace),
 			cfg.GetString(cfgK8SSecret),
-			k8sSecretLabels,
+			cfg.GetStringMapString(cfgK8SLabels),
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "error creating K8S Secret kv store")
@@ -252,21 +276,19 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 		k8s, err := k8s.New(
 			cfg.GetString(cfgK8SNamespace),
 			cfg.GetString(cfgK8SSecret),
-			k8sSecretLabels,
+			cfg.GetStringMapString(cfgK8SLabels),
 		)
 		if err != nil {
-			return nil, errors.Wrap(err, "error creating K8S Secret with with kv store")
+			return nil, errors.Wrap(err, "error creating K8S Secret with kv store")
 		}
 
-		config := hsm.Config{
+		hsm, err := hsm.New(hsm.Config{
 			ModulePath: cfg.GetString(cfgHSMModulePath),
 			SlotID:     cfg.GetUint(cfgHSMSlotID),
 			TokenLabel: cfg.GetString(cfgHSMTokenLabel),
 			Pin:        cfg.GetString(cfgHSMPin),
 			KeyLabel:   cfg.GetString(cfgHSMKeyLabel),
-		}
-
-		hsm, err := hsm.New(config, k8s)
+		}, k8s)
 		if err != nil {
 			return nil, errors.Wrap(err, "error creating HSM kv store")
 		}
@@ -275,15 +297,13 @@ func kvStoreForConfig(cfg *viper.Viper) (kv.Service, error) {
 
 	// BANK_VAULTS_HSM_PIN=banzai bank-vaults unseal --init --mode hsm --hsm-slot-id 0 --hsm-module-path /usr/local/lib/opensc-pkcs11.so
 	case cfgModeValueHSM:
-		config := hsm.Config{
+		hsm, err := hsm.New(hsm.Config{
 			ModulePath: cfg.GetString(cfgHSMModulePath),
 			SlotID:     cfg.GetUint(cfgHSMSlotID),
 			TokenLabel: cfg.GetString(cfgHSMTokenLabel),
 			Pin:        cfg.GetString(cfgHSMPin),
 			KeyLabel:   cfg.GetString(cfgHSMKeyLabel),
-		}
-
-		hsm, err := hsm.New(config, nil)
+		}, nil)
 		if err != nil {
 			return nil, errors.Wrap(err, "error creating HSM kv store")
 		}

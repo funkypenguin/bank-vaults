@@ -15,13 +15,12 @@
 package file
 
 import (
-	"io/ioutil"
 	"os"
 	"path"
 
 	"emperror.dev/errors"
 
-	"github.com/banzaicloud/bank-vaults/pkg/kv"
+	"github.com/bank-vaults/bank-vaults/pkg/kv"
 )
 
 type file struct {
@@ -36,11 +35,11 @@ func New(path string) (service kv.Service, err error) {
 }
 
 func (f *file) Set(key string, val []byte) error {
-	return ioutil.WriteFile(path.Join(f.path, key), val, 0600)
+	return os.WriteFile(path.Join(f.path, key), val, 0o600)
 }
 
 func (f *file) Get(key string) ([]byte, error) {
-	val, err := ioutil.ReadFile(path.Join(f.path, key))
+	val, err := os.ReadFile(path.Join(f.path, key))
 	if os.IsNotExist(err) {
 		return nil, kv.NewNotFoundError("key '%s' is not present in file", key)
 	}

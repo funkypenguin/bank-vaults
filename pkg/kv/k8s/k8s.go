@@ -27,7 +27,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/banzaicloud/bank-vaults/pkg/kv"
+	"github.com/bank-vaults/bank-vaults/pkg/kv"
 )
 
 // EnvK8SOwnerReference holds the environment variable name for passing in K8S owner refs
@@ -46,7 +46,6 @@ type k8sStorage struct {
 func New(namespace, secret string, labels map[string]string) (kv.Service, error) {
 	kubeconfig := os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
 	var config *rest.Config
-
 	var err error
 	if kubeconfig != "" {
 		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
@@ -69,7 +68,7 @@ func New(namespace, secret string, labels map[string]string) (kv.Service, error)
 		ownerReference = &metav1.OwnerReference{}
 		err := json.Unmarshal([]byte(ownerReferenceJSON), ownerReference)
 		if err != nil {
-			return nil, errors.Wrap(err, "error unmarhsaling OwnerReference")
+			return nil, errors.Wrap(err, "error unmarshaling OwnerReference")
 		}
 	}
 
@@ -85,8 +84,9 @@ func New(namespace, secret string, labels map[string]string) (kv.Service, error)
 func (k *k8sStorage) Set(key string, val []byte) error {
 	secret, err := k.client.CoreV1().Secrets(k.namespace).Get(context.Background(), k.secret, metav1.GetOptions{})
 
-	if k8serrors.IsNotFound(err) {
-		secret := &v1.Secret{
+	switch {
+	case k8serrors.IsNotFound(err):
+		secret = &v1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: k.namespace,
 				Name:      k.secret,
@@ -98,13 +98,15 @@ func (k *k8sStorage) Set(key string, val []byte) error {
 			secret.ObjectMeta.SetOwnerReferences([]metav1.OwnerReference{*k.ownerReference})
 		}
 		_, err = k.client.CoreV1().Secrets(k.namespace).Create(context.Background(), secret, metav1.CreateOptions{})
-	} else if err == nil {
+	case err == nil:
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
 		secret.Data[key] = val
 		_, err = k.client.CoreV1().Secrets(k.namespace).Update(context.Background(), secret, metav1.UpdateOptions{})
-	} else {
+	default:
 		return errors.Wrapf(err, "error checking if '%s' secret exists", k.secret)
 	}
-
 	if err != nil {
 		return errors.Wrapf(err, "error writing secret key '%s' into secret '%s'", key, k.secret)
 	}
@@ -122,10 +124,9 @@ func (k *k8sStorage) Get(key string) ([]byte, error) {
 		return nil, errors.Wrapf(err, "error getting secret for key '%s'", key)
 	}
 
-	val := secret.Data[key]
-	if val == nil {
+	if secret.Data[key] == nil {
 		return nil, kv.NewNotFoundError("key '%s' is not present in secret: %s", key, secret.GetName())
 	}
 
-	return val, nil
+	return secret.Data[key], nil
 }

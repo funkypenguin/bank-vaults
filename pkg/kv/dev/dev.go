@@ -15,12 +15,11 @@
 package dev
 
 import (
-	"io/ioutil"
 	"os"
 
 	"emperror.dev/errors"
 
-	"github.com/banzaicloud/bank-vaults/pkg/kv"
+	"github.com/bank-vaults/bank-vaults/pkg/kv"
 )
 
 type dev struct {
@@ -30,9 +29,8 @@ type dev struct {
 // New creates a new kv.Service backed by memory, only the root token is stored, should be used with: vault server -dev
 func New() (service kv.Service, err error) {
 	rootToken := []byte(os.Getenv("VAULT_TOKEN"))
-
 	if len(rootToken) == 0 {
-		rootToken, err = ioutil.ReadFile(os.Getenv("HOME") + "/.vault-token")
+		rootToken, err = os.ReadFile(os.Getenv("HOME") + "/.vault-token")
 		if err != nil {
 			return nil, errors.Wrap(err, "error creating dev client")
 		}
@@ -43,7 +41,7 @@ func New() (service kv.Service, err error) {
 	return
 }
 
-func (d *dev) Set(key string, val []byte) error {
+func (d *dev) Set(_ string, _ []byte) error {
 	return nil
 }
 

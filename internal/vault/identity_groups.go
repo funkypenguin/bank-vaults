@@ -11,15 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 package vault
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"emperror.dev/errors"
 	"github.com/hashicorp/vault/api"
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
 )
 
@@ -48,6 +49,7 @@ func readVaultGroup(group string, client *api.Client) (secret *api.Secret, err e
 		// No Data returned, Group does not exist
 		return nil, nil
 	}
+
 	return secret, nil
 }
 
@@ -60,6 +62,7 @@ func readVaultGroupAlias(id string, client *api.Client) (secret *api.Secret, err
 		// No Data returned, Group does not exist
 		return nil, nil
 	}
+
 	return secret, nil
 }
 
@@ -72,6 +75,7 @@ func getVaultAuthMountAccessor(path string, client *api.Client) (accessor string
 	if mounts[path] == nil {
 		return "", errors.Errorf("auth mount path %s does not exist in vault", path)
 	}
+
 	return mounts[path].Accessor, nil
 }
 
@@ -83,6 +87,7 @@ func getVaultGroupID(group string, client *api.Client) (id string, err error) {
 	if g == nil {
 		return "", errors.Errorf("group %s does not exist", group)
 	}
+
 	return g.Data["id"].(string), nil
 }
 
@@ -94,6 +99,7 @@ func getVaultGroupAliasName(aliasID string, client *api.Client) (id string, err 
 	if alias == nil {
 		return "", errors.Errorf("group alias %s does not exist", aliasID)
 	}
+
 	return alias.Data["name"].(string), nil
 }
 
@@ -105,6 +111,7 @@ func getVaultGroupAliasMount(aliasID string, client *api.Client) (id string, err
 	if alias == nil {
 		return "", errors.Errorf("group alias %s does not exist", aliasID)
 	}
+
 	return alias.Data["mount_accessor"].(string), nil
 }
 
@@ -149,7 +156,7 @@ func (v *vault) getExistingGroups() (map[string]bool, error) {
 	}
 
 	if existingGroupsList == nil {
-		logrus.Debugf("vault has no groups")
+		slog.Debug("vault has no groups")
 		return nil, nil
 	}
 
@@ -190,13 +197,13 @@ func (v *vault) addManagedGroups(managedGroups []group) error {
 		}
 
 		if g == nil {
-			logrus.Infof("adding group %s", group.Name)
+			slog.Info(fmt.Sprintf("adding group %s", group.Name))
 			_, err = v.writeWithWarningCheck("identity/group", config)
 			if err != nil {
 				return errors.Wrapf(err, "failed to create group %s", group.Name)
 			}
 		} else {
-			logrus.Infof("tuning already existing group: %s", group.Name)
+			slog.Info(fmt.Sprintf("tuning already existing group: %s", group.Name))
 			_, err = v.writeWithWarningCheck(fmt.Sprintf("identity/group/name/%s", group.Name), config)
 			if err != nil {
 				return errors.Wrapf(err, "failed to tune group %s", group.Name)
@@ -208,8 +215,8 @@ func (v *vault) addManagedGroups(managedGroups []group) error {
 }
 
 func (v *vault) removeUnmanagedGroups(managedGroups []group) error {
-	if !extConfig.PurgeUnmanagedConfig.Enabled || extConfig.PurgeUnmanagedConfig.Exclude.Groups {
-		logrus.Debugf("purge config is disabled, no unmanaged groups will be removed")
+	if !v.externalConfig.PurgeUnmanagedConfig.Enabled || v.externalConfig.PurgeUnmanagedConfig.Exclude.Groups {
+		slog.Debug("purge config is disabled, no unmanaged groups will be removed")
 		return nil
 	}
 
@@ -220,7 +227,7 @@ func (v *vault) removeUnmanagedGroups(managedGroups []group) error {
 
 	unmanagedGroups := getUnmanagedGroups(existingGroups, managedGroups)
 	for unmanagedGroupName := range unmanagedGroups {
-		logrus.Infof("removing group %s", unmanagedGroupName)
+		slog.Info(fmt.Sprintf("removing group %s", unmanagedGroupName))
 		_, err := v.cl.Logical().Delete("identity/group/name/" + unmanagedGroupName)
 		if err != nil {
 			return errors.Wrapf(err, "error removing group %s from vault", unmanagedGroupName)
@@ -260,13 +267,13 @@ func (v *vault) addManagedGroupAliases(managedGroupAliases []groupAlias) error {
 		}
 
 		if ga == "" {
-			logrus.Infof("adding group-alias: %s@%s", groupAlias.Name, accessor)
+			slog.Info(fmt.Sprintf("adding group-alias: %s@%s", groupAlias.Name, accessor))
 			_, err = v.writeWithWarningCheck("identity/group-alias", config)
 			if err != nil {
 				return errors.Wrapf(err, "failed to create group-alias %s", groupAlias.Name)
 			}
 		} else {
-			logrus.Infof("tuning already existing group-alias: %s@%s - ID: %s", groupAlias.Name, accessor, ga)
+			slog.Info(fmt.Sprintf("tuning already existing group-alias: %s@%s - ID: %s", groupAlias.Name, accessor, ga))
 			_, err = v.writeWithWarningCheck(fmt.Sprintf("identity/group-alias/id/%s", ga), config)
 			if err != nil {
 				return errors.Wrapf(err, "failed to tune group-alias %s", ga)
@@ -278,7 +285,7 @@ func (v *vault) addManagedGroupAliases(managedGroupAliases []groupAlias) error {
 }
 
 func (v *vault) getExistingGroupAliases() (map[string]string, error) {
-	existinGroupAliases := make(map[string]string)
+	existingGroupAliases := make(map[string]string)
 
 	existingGroupAliasesRaw, err := v.cl.Logical().ReadWithData(
 		"identity/group-alias/id", map[string][]string{"list": {"true"}})
@@ -287,17 +294,17 @@ func (v *vault) getExistingGroupAliases() (map[string]string, error) {
 	}
 
 	if existingGroupAliasesRaw == nil {
-		logrus.Debugf("vault has no group-aliases")
+		slog.Debug("vault has no group-aliases")
 		return nil, nil
 	}
 
 	existingGroupAliasesData := cast.ToStringMap(existingGroupAliasesRaw.Data["key_info"])
 	for existingGroupAliasID, existingGroupAliasRaw := range existingGroupAliasesData {
 		existingGroupAlias := cast.ToStringMapString(existingGroupAliasRaw)
-		existinGroupAliases[existingGroupAlias["name"]] = existingGroupAliasID
+		existingGroupAliases[existingGroupAlias["name"]] = existingGroupAliasID
 	}
 
-	return existinGroupAliases, nil
+	return existingGroupAliases, nil
 }
 
 func getUnmanagedGroupAliases(existingGroupAliases map[string]string, managedGroupAliases []groupAlias) map[string]string {
@@ -309,8 +316,8 @@ func getUnmanagedGroupAliases(existingGroupAliases map[string]string, managedGro
 }
 
 func (v *vault) removeUnmanagedGroupAliases(managedGroupAliases []groupAlias) error {
-	if !extConfig.PurgeUnmanagedConfig.Enabled || extConfig.PurgeUnmanagedConfig.Exclude.GroupAliases {
-		logrus.Debugf("purge config is disabled, no unmanaged group-alias will be removed")
+	if !v.externalConfig.PurgeUnmanagedConfig.Enabled || v.externalConfig.PurgeUnmanagedConfig.Exclude.GroupAliases {
+		slog.Debug("purge config is disabled, no unmanaged group-alias will be removed")
 		return nil
 	}
 
@@ -320,7 +327,7 @@ func (v *vault) removeUnmanagedGroupAliases(managedGroupAliases []groupAlias) er
 	}
 	unmanagedGroupAliases := getUnmanagedGroupAliases(existingGroupAliases, managedGroupAliases)
 
-	logrus.Infof("removing group-aliases ... %T", unmanagedGroupAliases)
+	slog.Info(fmt.Sprintf("removing group-aliases ... %T", unmanagedGroupAliases))
 	for unmanagedGroupAliasName, unmanagedGroupAliasID := range unmanagedGroupAliases {
 		_, err := v.cl.Logical().Delete("identity/group-alias/id/" + unmanagedGroupAliasID)
 		if err != nil {
@@ -336,8 +343,8 @@ func (v *vault) removeUnmanagedGroupAliases(managedGroupAliases []groupAlias) er
 // Configure groups and group-aliases.
 
 func (v *vault) configureIdentityGroups() error {
-	managedGroups := extConfig.Groups
-	managedGroupAliases := extConfig.GroupAliases
+	managedGroups := v.externalConfig.Groups
+	managedGroupAliases := v.externalConfig.GroupAliases
 
 	if err := v.addManagedGroups(managedGroups); err != nil {
 		return errors.Wrap(err, "error while adding groups")

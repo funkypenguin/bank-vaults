@@ -18,13 +18,15 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"fmt"
+	"log/slog"
+	"os"
 
 	"emperror.dev/errors"
 	"github.com/miekg/pkcs11"
 	"github.com/miekg/pkcs11/p11"
-	"github.com/sirupsen/logrus"
 
-	"github.com/banzaicloud/bank-vaults/pkg/kv"
+	"github.com/bank-vaults/bank-vaults/pkg/kv"
 )
 
 const noObjectsFoundErrMsg = "no objects found"
@@ -36,7 +38,7 @@ type hsmCrypto struct {
 	publicKey  p11.PublicKey
 	privateKey p11.PrivateKey
 	storage    kv.Service
-	log        *logrus.Logger
+	log        *slog.Logger
 	session    p11.Session
 	encrypt    cryptoFunc
 	decrypt    cryptoFunc
@@ -53,7 +55,7 @@ type Config struct {
 
 // New returns a HSM backed KV encryptor. Currently RSA keys are supported only.
 func New(config Config, storage kv.Service) (kv.Service, error) {
-	log := logrus.New()
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	if config.KeyLabel == "" {
 		return nil, errors.New("key label is required")
@@ -69,20 +71,20 @@ func New(config Config, storage kv.Service) (kv.Service, error) {
 		return nil, errors.Wrap(err, "failed to get module info")
 	}
 
-	log.Infof("HSM Information %+v", info)
+	log.Info(fmt.Sprintf("HSM Information %+v", info))
 
 	slots, err := module.Slots()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to list module slots")
 	}
 
-	log.Infof("HSM Searching for slot in HSM slots %+v", slots)
+	log.Info(fmt.Sprintf("HSM Searching for slot in HSM slots %+v", slots))
 	var slot *p11.Slot
 	for _, s := range slots {
 		if config.TokenLabel == "" {
 			if s.ID() == config.SlotID {
-				slot = &s // nolint:gosec
-				log.Infof("found HSM slot %d in HSM by slot ID", slot.ID())
+				slot = &s //nolint:gosec,exportloopref
+				log.Info(fmt.Sprintf("found HSM slot %d in HSM by slot ID", slot.ID()))
 
 				break
 			}
@@ -92,8 +94,8 @@ func New(config Config, storage kv.Service) (kv.Service, error) {
 				return nil, errors.WrapIf(err, "can't query token info from slot")
 			}
 			if tokenInfo.Label == config.TokenLabel {
-				slot = &s // nolint:gosec
-				log.Infof("found HSM slot %d in HSM by token label", slot.ID())
+				slot = &s //nolint:gosec,exportloopref
+				log.Info(fmt.Sprintf("found HSM slot %d in HSM by token label", slot.ID()))
 
 				break
 			}
@@ -109,7 +111,7 @@ func New(config Config, storage kv.Service) (kv.Service, error) {
 		return nil, errors.WrapIf(err, "can't query token info from slot")
 	}
 
-	log.Infof("HSM TokenInfo %+v", tokenInfo)
+	log.Info(fmt.Sprintf("HSM TokenInfo %+v", tokenInfo))
 
 	bestMechanism := pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)
 
@@ -132,7 +134,7 @@ func New(config Config, storage kv.Service) (kv.Service, error) {
 		return nil, errors.WrapIf(err, "can't get HSM slot info")
 	}
 
-	log.Infof("HSM SlotInfo for slot %d: %+v", config.SlotID, slotInfo)
+	log.Info(fmt.Sprintf("HSM SlotInfo for slot %d: %+v", config.SlotID, slotInfo))
 
 	session, err := slot.OpenWriteSession()
 	if err != nil {
@@ -160,23 +162,23 @@ func New(config Config, storage kv.Service) (kv.Service, error) {
 	privateKeyObj, privateKeyErr := session.FindObject(privateKeyAttributes)
 
 	// ignore "no objects found" errors and generate a key
-	if publicKeyErr != nil && privateKeyErr != nil {
+	switch {
+	case publicKeyErr != nil && privateKeyErr != nil:
 		log.Info("generating key pair in HSM...")
 
-		request := generateRSAKeyPairRequest(config.KeyLabel)
-		keyPair, err := session.GenerateKeyPair(request)
+		keyPair, err := session.GenerateKeyPair(generateRSAKeyPairRequest(config.KeyLabel))
 		if err != nil {
 			return nil, errors.WrapIf(err, "GenerateKeyPair in HSM failed")
 		}
 
 		publicKey = keyPair.Public
 		privateKey = keyPair.Private
-	} else if publicKeyErr == nil && privateKeyErr == nil {
-		log.Infof("found objects with label %q in HSM", config.KeyLabel)
+	case publicKeyErr == nil && privateKeyErr == nil:
+		log.Info(fmt.Sprintf("found objects with label %q in HSM", config.KeyLabel))
 
 		publicKey = p11.PublicKey(publicKeyObj)
 		privateKey = p11.PrivateKey(privateKeyObj)
-	} else {
+	default:
 		return nil, errors.WrapIf(errors.Combine(publicKeyErr, privateKeyErr), "only one of the keys found with the specified label")
 	}
 
@@ -186,11 +188,11 @@ func New(config Config, storage kv.Service) (kv.Service, error) {
 	var encrypt cryptoFunc
 
 	if info.ManufacturerID == "OpenSC Project" {
-		log.Info("this HSM doesn't support on-device encryption, extracting public key and doing encrytion on the computer")
+		log.Info("this HSM doesn't support on-device encryption, extracting public key and doing encryption on the computer")
 
 		publicKeyValue, err := p11.Object(publicKey).Value()
 		if err != nil {
-			return nil, errors.WrapIf(err, "can't get puclic key value")
+			return nil, errors.WrapIf(err, "can't get public key value")
 		}
 
 		publicKey, err := x509.ParsePKCS1PublicKey(publicKeyValue)
@@ -257,7 +259,7 @@ func (h *hsmCrypto) Set(key string, value []byte) error {
 
 /*
 Purpose: Generate RSA keypair with a given tokenLabel and persistence.
-	tokenLabel: string to set as the token labels
+tokenLabel: string to set as the token labels
 */
 func generateRSAKeyPairRequest(tokenLabel string) p11.GenerateKeyPairRequest {
 	mechanism := *pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS_KEY_PAIR_GEN, nil)
@@ -294,12 +296,10 @@ type hsmStorage struct {
 }
 
 func (h *hsmStorage) Get(key string) ([]byte, error) {
-	attributes := []*pkcs11.Attribute{
+	object, err := h.session.FindObject([]*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_DATA),
 		pkcs11.NewAttribute(pkcs11.CKA_LABEL, key),
-	}
-
-	object, err := h.session.FindObject(attributes)
+	})
 	if err != nil {
 		if err.Error() == noObjectsFoundErrMsg {
 			return nil, kv.NewNotFoundError("object doesn't exist in HSM: %s", key)
@@ -312,13 +312,11 @@ func (h *hsmStorage) Get(key string) ([]byte, error) {
 }
 
 func (h *hsmStorage) Set(key string, value []byte) error {
-	attributes := []*pkcs11.Attribute{
+	_, err := h.session.CreateObject([]*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, pkcs11.CKO_DATA),
 		pkcs11.NewAttribute(pkcs11.CKA_VALUE, value),
 		pkcs11.NewAttribute(pkcs11.CKA_LABEL, key),
-	}
-
-	_, err := h.session.CreateObject(attributes)
+	})
 
 	return errors.Wrap(err, "failed to write object to HSM")
 }

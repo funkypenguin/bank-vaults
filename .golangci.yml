@@ -1,43 +1,36 @@
 run:
-    skip-dirs:
-        - operator
-    timeout: 5m
+  timeout: 10m
 
 linters-settings:
-    golint:
-        min-confidence: 0.1
-    goimports:
-        local-prefixes: github.com/banzaicloud/bank-vaults
+  gci:
+    sections:
+      - standard
+      - default
+      - prefix(github.com/bank-vaults/bank-vaults)
+  goimports:
+    local-prefixes: github.com/bank-vaults/bank-vaults
+  misspell:
+    locale: US
+  nolintlint:
+    allow-unused: false # report any unused nolint directives
+    require-specific: false # don't require nolint directives to be specific about which linter is being skipped
+  revive:
+    confidence: 0
 
 linters:
-    enable-all: true
-    disable:
-        - maligned
-        - funlen
-        - dupl
-        - nestif
-        - wsl
-        - lll
-        - interfacer
-        - exhaustivestruct
-        - nlreturn
-
-        # TODO: fixme
-        - paralleltest
-        - forcetypeassert
-        - wrapcheck
-        - exportloopref
-        - cyclop
-        - godox
-        - godot
-        - gomnd
-        - gochecknoglobals
-        - gochecknoinits
-        - goconst
-        - gocognit
-        - golint
-        - scopelint
-        - gocritic
-        - stylecheck
-        - gocyclo
-        - testpackage
+  enable:
+    - bodyclose
+    - errcheck
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+    - gosimple
+    - ineffassign
+    - misspell
+    - nolintlint
+    - revive
+    - unconvert
+    - unparam
+    - unused
+    - whitespace

@@ -17,18 +17,18 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-var c = viper.New()
+var Version = "dev"
 
 const (
 	cfgSecretShares    = "secret-shares"
@@ -41,6 +41,7 @@ const (
 	cfgModeValueGoogleCloudKMSGCS = "google-cloud-kms-gcs"
 	cfgModeValueAzureKeyVault     = "azure-key-vault"
 	cfgModeValueAlibabaKMSOSS     = "alibaba-kms-oss"
+	cfgModeValueOCI               = "oci"
 	cfgModeValueVault             = "vault"
 	cfgModeValueK8S               = "k8s"
 	cfgModeValueHSMK8S            = "hsm-k8s"
@@ -62,8 +63,9 @@ const (
 )
 
 const (
-	cfgAWSKMSRegion = "aws-kms-region"
-	cfgAWSKMSKeyID  = "aws-kms-key-id"
+	cfgAWSKMSRegion            = "aws-kms-region"
+	cfgAWSKMSKeyID             = "aws-kms-key-id"
+	cfgAWSKMSEncryptionContext = "aws-kms-encryption-context"
 )
 
 const (
@@ -74,6 +76,14 @@ const (
 )
 
 const cfgAzureKeyVaultName = "azure-key-vault-name"
+
+const (
+	cfgOciKeyOCID               = "oci-key-ocid"
+	cfgOciCryptographicEndpoint = "oci-cryptographic-endpoint"
+	cfgOciBucketNamespace       = "oci-bucket-namespace"
+	cfgOciBucketName            = "oci-bucket-name"
+	cfgOciBucketPrefix          = "oci-bucket-prefix"
+)
 
 const (
 	cfgAlibabaOSSEndpoint     = "alibaba-oss-endpoint"
@@ -103,7 +113,7 @@ const (
 const (
 	cfgHSMModulePath = "hsm-module-path"
 	cfgHSMSlotID     = "hsm-slot-id"
-	cfgHSMTokenLabel = "hsm-token-label" // nolint:gosec
+	cfgHSMTokenLabel = "hsm-token-label" //nolint:gosec
 	cfgHSMPin        = "hsm-pin"
 	cfgHSMKeyLabel   = "hsm-key-label"
 )
@@ -115,9 +125,7 @@ const (
 	cfgOnce         = "once"
 )
 
-// We need to pre-create a value and bind the the flag to this until
-// https://github.com/spf13/viper/issues/608 gets fixed.
-var k8sSecretLabels map[string]string
+var c = viper.New()
 
 var rootCmd = &cobra.Command{
 	Use:   "bank-vaults",
@@ -136,7 +144,8 @@ func execute() {
 	}()
 
 	if err := rootCmd.Execute(); err != nil {
-		logrus.Fatalf("error executing command: %s", err.Error())
+		slog.Error(fmt.Sprintf("error executing command: %s", err.Error()))
+		os.Exit(1)
 	}
 }
 
@@ -165,9 +174,9 @@ func configStringSliceVar(cmd *cobra.Command, key string, defaultValue []string,
 	_ = c.BindPFlag(key, cmd.PersistentFlags().Lookup(key))
 }
 
-func configStringMapVar(cmd *cobra.Command, key string, value *map[string]string, description string) {
-	cmd.PersistentFlags().StringToStringVar(value, key, nil, description)
-	_ = c.BindPFlag(key, cmd.Flags().Lookup(key))
+func configStringMapVar(cmd *cobra.Command, key string, defaultValue map[string]string, description string) {
+	cmd.PersistentFlags().StringToString(key, defaultValue, description)
+	_ = c.BindPFlag(key, cmd.PersistentFlags().Lookup(key))
 }
 
 func init() {
@@ -187,6 +196,7 @@ func init() {
 						'%s' => Azure Key Vault secret;
 						'%s' => Alibaba OSS using Alibaba KMS encryption;
 						'%s' => Remote Vault;
+						'%s' => Oracle KMS;
 						'%s' => Kubernetes Secrets;
 						'%s' => Kubernetes Secrets encrypted with HSM;
 						'%s' => HSM object on device, using HSM encryption;
@@ -197,6 +207,7 @@ func init() {
 			cfgModeValueAzureKeyVault,
 			cfgModeValueAlibabaKMSOSS,
 			cfgModeValueVault,
+			cfgModeValueOCI,
 			cfgModeValueK8S,
 			cfgModeValueHSMK8S,
 			cfgModeValueHSM,
@@ -222,6 +233,7 @@ func init() {
 	// AWS KMS flags
 	configStringSliceVar(rootCmd, cfgAWSKMSRegion, nil, "The region of the AWS KMS key to encrypt values")
 	configStringSliceVar(rootCmd, cfgAWSKMSKeyID, nil, "The ID or ARN of the AWS KMS key to encrypt values")
+	configStringMapVar(rootCmd, cfgAWSKMSEncryptionContext, map[string]string{"Tool": "bank-vaults"}, "The encryption context that AWS KMS will use to encrypt values")
 
 	// AWS S3 Object Storage flags
 	configStringSliceVar(rootCmd, cfgAWSS3Region, []string{"us-east-1"}, "The region to use for storing values in AWS S3")
@@ -231,6 +243,13 @@ func init() {
 
 	// Azure Key Vault flags
 	configStringVar(rootCmd, cfgAzureKeyVaultName, "", "The name of the Azure Key Vault to encrypt and store values in")
+
+	// OCI Key flags
+	configStringVar(rootCmd, cfgOciKeyOCID, "", "The Oracle key OCID to use")
+	configStringVar(rootCmd, cfgOciCryptographicEndpoint, "", "The cryptographic endpoint associated with the Oracle key")
+	configStringVar(rootCmd, cfgOciBucketName, "", "The Oracle bucket to use")
+	configStringVar(rootCmd, cfgOciBucketNamespace, "", "The namespace associated with the Oracle bucket")
+	configStringVar(rootCmd, cfgOciBucketPrefix, "", "The prefix to use for the Oracle bucket")
 
 	// Alibaba Access Key flags
 	configStringVar(rootCmd, cfgAlibabaAccessKeyID, "", "The Alibaba AccessKeyID to use")
@@ -256,7 +275,7 @@ func init() {
 	// K8S Secret Storage flags
 	configStringVar(rootCmd, cfgK8SNamespace, "", "The namespace of the K8S Secret to store values in")
 	configStringVar(rootCmd, cfgK8SSecret, "", "The name of the K8S Secret to store values in")
-	configStringMapVar(rootCmd, cfgK8SLabels, &k8sSecretLabels, "The labels of the K8S Secret to store values in")
+	configStringMapVar(rootCmd, cfgK8SLabels, map[string]string{}, "The labels of the K8S Secret to store values in")
 
 	// HSM flags
 	configStringVar(rootCmd, cfgHSMModulePath, "", "The library path of the HSM device")
@@ -269,7 +288,7 @@ func init() {
 	configStringVar(rootCmd, cfgFilePath, "", "The path prefix of the files where to store values in")
 
 	// Misc common flags
-	configBoolVar(rootCmd, cfgOnce, false, "Run configure/unsela only once")
+	configBoolVar(rootCmd, cfgOnce, false, "Run configure/unseal only once")
 	configDurationVar(configureCmd, cfgUnsealPeriod, time.Second*5, "How often to attempt to unseal the Vault instance")
 }
 

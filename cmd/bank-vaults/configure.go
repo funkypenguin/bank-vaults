@@ -15,21 +15,22 @@
 package main
 
 import (
-	"io/ioutil"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/bank-vaults/vault-sdk/utils/templater"
+	"github.com/bank-vaults/vault-sdk/vault"
 	"github.com/fsnotify/fsnotify"
 	"github.com/jpillora/backoff"
-	"github.com/sirupsen/logrus"
+	"github.com/ramizpolic/multiparser"
+	"github.com/ramizpolic/multiparser/parser"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
-	"github.com/banzaicloud/bank-vaults/internal/configuration"
-	internalVault "github.com/banzaicloud/bank-vaults/internal/vault"
-	"github.com/banzaicloud/bank-vaults/pkg/sdk/vault"
+	internalVault "github.com/bank-vaults/bank-vaults/internal/vault"
 )
 
 const (
@@ -38,13 +39,18 @@ const (
 	cfgDisableMetrics  = "disable-metrics"
 )
 
+type configFile struct {
+	Path string
+	Data map[string]interface{}
+}
+
 var configureCmd = &cobra.Command{
 	Use:   "configure",
 	Short: "Configures a Vault based on a YAML/JSON configuration file",
 	Long: `This configuration is an extension to what is available through the Vault configuration:
 			https://www.vaultproject.io/docs/configuration/index.html. With this it is possible to
 			configure secret engines, auth methods, etc...`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Run: func(_ *cobra.Command, _ []string) {
 		var unsealConfig unsealCfg
 
 		runOnce := c.GetBool(cfgOnce)
@@ -55,17 +61,20 @@ var configureCmd = &cobra.Command{
 
 		store, err := kvStoreForConfig(c)
 		if err != nil {
-			logrus.Fatalf("error creating kv store: %s", err.Error())
+			slog.Error(fmt.Sprintf("error creating kv store: %s", err.Error()))
+			os.Exit(1)
 		}
 
 		cl, err := vault.NewRawClient()
 		if err != nil {
-			logrus.Fatalf("error connecting to vault: %s", err.Error())
+			slog.Error(fmt.Sprintf("error connecting to vault: %s", err.Error()))
+			os.Exit(1)
 		}
 
 		v, err := internalVault.New(store, cl, vaultConfigForConfig(c))
 		if err != nil {
-			logrus.Fatalf("error creating vault helper: %s", err.Error())
+			slog.Error(fmt.Sprintf("error creating vault helper: %s", err.Error()))
+			os.Exit(1)
 		}
 
 		if !disableMetrics {
@@ -73,20 +82,33 @@ var configureCmd = &cobra.Command{
 			go func() {
 				err := metrics.Run()
 				if err != nil {
-					logrus.Fatalf("error creating prometheus exporter: %s", err.Error())
+					slog.Error(fmt.Sprintf("error creating prometheus exporter: %s", err.Error()))
+					os.Exit(1)
 				}
 			}()
 		}
 
-		configurations := make(chan *viper.Viper, len(vaultConfigFiles))
+		// Create parsers
+		parser, err := multiparser.New(parser.JSON, parser.YAML)
+		if err != nil {
+			slog.Error(fmt.Sprintf("error file parsers: %v", err))
+			os.Exit(1)
+		}
 
+		configurations := make(chan *configFile, len(vaultConfigFiles))
 		for i, vaultConfigFile := range vaultConfigFiles {
 			vaultConfigFiles[i] = filepath.Clean(vaultConfigFile)
-			configurations <- parseConfiguration(vaultConfigFile)
+			configurations <- parseConfiguration(parser, vaultConfigFile)
 		}
 
 		if !runOnce {
-			go watchConfigurations(vaultConfigFiles, configurations)
+			go func() {
+				err := watchConfigurations(parser, vaultConfigFiles, configurations)
+				if err != nil {
+					slog.Error(fmt.Sprintf("error watching configuration: %v", err))
+					os.Exit(1)
+				}
+			}()
 		} else {
 			close(configurations)
 		}
@@ -100,15 +122,13 @@ var configureCmd = &cobra.Command{
 		}
 
 		for config := range configurations {
-
-			logrus.Infoln("applying config file :", config.ConfigFileUsed())
-
+			slog.Info(fmt.Sprintf("applying config file: %s", config.Path))
 			func() {
 				for {
-					logrus.Infof("checking if vault is sealed...")
+					slog.Info("checking if vault is sealed...")
 					sealed, err := v.Sealed()
 					if err != nil {
-						logrus.Errorf("error checking if vault is sealed: %s, waiting %s before trying again...", err.Error(), unsealConfig.unsealPeriod)
+						slog.Error(fmt.Sprintf("error checking if vault is sealed: %s, waiting %s before trying again...", err.Error(), unsealConfig.unsealPeriod))
 						time.Sleep(unsealConfig.unsealPeriod)
 
 						continue
@@ -116,23 +136,22 @@ var configureCmd = &cobra.Command{
 
 					// If vault is sealed, we stop here and wait another unsealPeriod
 					if sealed {
-						logrus.Infof("vault is sealed, waiting %s before trying again...", unsealConfig.unsealPeriod)
+						slog.Info(fmt.Sprintf("vault is sealed, waiting %s before trying again...", unsealConfig.unsealPeriod))
 						time.Sleep(unsealConfig.unsealPeriod)
 
 						continue
 					}
+					slog.Info("vault is unsealed, configuring...")
 
-					logrus.Info("vault is unsealed, configuring...")
-
-					if err = v.Configure(config); err != nil {
-						logrus.Errorf("error configuring vault: %s", err.Error())
+					if err = v.Configure(config.Data); err != nil {
+						slog.Error(fmt.Sprintf("error configuring vault: %s", err.Error()))
 						if errorFatal {
 							os.Exit(1)
 						}
 
 						failedConfigurationsCount++
 						// Failed configuration handler - Increase the backoff sleep
-						go handleConfigurationError(config.ConfigFileUsed(), configurations, b.Duration())
+						go handleConfigurationError(parser, config.Path, configurations, b.Duration())
 
 						return
 					}
@@ -140,7 +159,7 @@ var configureCmd = &cobra.Command{
 					// On *any* successful configuration reset the backoff
 					b.Reset()
 					successfulConfigurationsCount++
-					logrus.Info("successfully configured vault")
+					slog.Info("successfully configured vault")
 
 					return
 				}
@@ -149,22 +168,21 @@ var configureCmd = &cobra.Command{
 	},
 }
 
-func handleConfigurationError(vaultConfigFile string, configurations chan *viper.Viper, sleepTime time.Duration) {
+func handleConfigurationError(parser multiparser.Parser, vaultConfigFile string, configurations chan<- *configFile, sleepTime time.Duration) {
 	// This handler will sleep for a exponential backoff amount of time and re-inject the failed configuration into the
 	// configurations channel to be re-applied to vault
-	// Eventually consistent model - all recovarable errors (5xx and configs that depend on other configs) will be eventually fixed
-	// non recovarable errors will be retried and keep failing every MAX BACKOFF seconds, increasing the error counters ont he vault-configurator pod.
-	logrus.Infof("Failed applying configuration file: %s , sleeping for %s before trying again", vaultConfigFile, sleepTime)
+	// Eventually consistent model - all recoverable errors (5xx and configs that depend on other configs) will be eventually fixed
+	// non recoverable errors will be retried and keep failing every MAX BACKOFF seconds, increasing the error counters ont he vault-configurator pod.
+	slog.Info(fmt.Sprintf("Failed applying configuration file: %s , sleeping for %s before trying again", vaultConfigFile, sleepTime))
 	time.Sleep(sleepTime)
-	configurations <- parseConfiguration(vaultConfigFile)
+	configurations <- parseConfiguration(parser, vaultConfigFile)
 }
 
-func watchConfigurations(vaultConfigFiles []string, configurations chan *viper.Viper) {
+func watchConfigurations(parser multiparser.Parser, vaultConfigFiles []string, configurations chan<- *configFile) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		logrus.Fatal(err)
+		return fmt.Errorf("cannot create watcher: %w", err)
 	}
-
 	defer watcher.Close()
 
 	// Map used to match on kubernetes ..data to files inside of directory
@@ -184,10 +202,10 @@ func watchConfigurations(vaultConfigFiles []string, configurations chan *viper.V
 
 		configFileDirs[configDirTrimmed] = files
 
-		logrus.Infof("watching directory for changes: %s", configDir)
+		slog.Info(fmt.Sprintf("watching directory for changes: %s", configDir))
 		err := watcher.Add(configDir)
 		if err != nil {
-			logrus.Fatal(err)
+			return fmt.Errorf("cannot watch %s: %w", configDir, err)
 		}
 	}
 
@@ -198,43 +216,48 @@ func watchConfigurations(vaultConfigFiles []string, configurations chan *viper.V
 			// For real Files we only need to watch the WRITE Event # TODO: Sometimes it triggers 2 WRITE when a file is edited and saved
 			// For Kubernetes configMaps we need to watch for CREATE on the "..data"
 			if event.Op&fsnotify.Write == fsnotify.Write && stringInSlice(vaultConfigFiles, filepath.Clean(event.Name)) {
-				logrus.Infof("file has changed: %s", event.Name)
-				configurations <- parseConfiguration(filepath.Clean(event.Name))
+				slog.Info(fmt.Sprintf("file has changed: %s", event.Name))
+				configurations <- parseConfiguration(parser, filepath.Clean(event.Name))
 			} else if event.Op&fsnotify.Create == fsnotify.Create && filepath.Base(event.Name) == "..data" {
 				for _, fileName := range configFileDirs[filepath.Dir(event.Name)] {
-					logrus.Infof("ConfigMap has changed, reparsing: %s", fileName)
-					configurations <- parseConfiguration(fileName)
+					slog.Info(fmt.Sprintf("ConfigMap has changed, reparsing: %s", fileName))
+					configurations <- parseConfiguration(parser, fileName)
 				}
 			}
+
 		case err := <-watcher.Errors:
-			logrus.Errorf("watcher event error: %s", err.Error())
+			return fmt.Errorf("watcher exited with error: %w", err)
 		}
 	}
 }
 
-func parseConfiguration(vaultConfigFile string) *viper.Viper {
-	config := viper.New()
-
-	vaultConfig, err := ioutil.ReadFile(vaultConfigFile)
+func parseConfiguration(parser multiparser.Parser, vaultConfigFile string) *configFile {
+	// Read file
+	vaultConfig, err := os.ReadFile(vaultConfigFile)
 	if err != nil {
-		logrus.Fatalf("error reading vault config template: %s", err.Error())
+		slog.Error(fmt.Sprintf("error reading vault config template: %s", err.Error()))
+		os.Exit(1)
 	}
 
-	templater := configuration.NewTemplater(configuration.DefaultLeftDelimiter, configuration.DefaultRightDelimiter)
-
+	// Replace env templating data
+	templater := templater.NewTemplater(templater.DefaultLeftDelimiter, templater.DefaultRightDelimiter)
 	buffer, err := templater.EnvTemplate(string(vaultConfig))
 	if err != nil {
-		logrus.Fatalf("error executing vault config template: %s", err.Error())
+		slog.Error(fmt.Sprintf("error executing vault config template: %s", err.Error()))
+		os.Exit(1)
 	}
 
-	config.SetConfigFile(vaultConfigFile)
-
-	err = config.ReadConfig(buffer)
-	if err != nil {
-		logrus.Fatalf("error parsing vault config file: %s", err.Error())
+	// Load raw data into map
+	var data map[string]interface{}
+	if err := parser.Parse(buffer.Bytes(), &data); err != nil {
+		slog.Error(fmt.Sprintf("error parsing vault config file: %v", err))
+		os.Exit(1)
 	}
 
-	return config
+	return &configFile{
+		Path: vaultConfigFile,
+		Data: data,
+	}
 }
 
 func stringInSlice(list []string, match string) bool {
