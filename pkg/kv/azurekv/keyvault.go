@@ -39,6 +39,10 @@ import (
 
 const AzureAuthLocation = "AZURE_AUTH_LOCATION"
 
+const AzureKeyVaultDNSSuffix = "AZURE_KEYVAULT_DNS_SUFFIX"
+
+const defaultKeyVaultDNSSuffix = "vault.azure.net"
+
 // azureKeyVault is an implementation of the kv.Service interface, that encrypts
 // and decrypts and stores data using Azure Key Vault.
 type azureKeyVault struct {
@@ -67,8 +71,13 @@ func New(name, prefix string) (kv.Service, error) {
 		log.Fatalf("failed to obtain a credential: %v", err)
 	}
 
+	dnsSuffix := os.Getenv(AzureKeyVaultDNSSuffix)
+	if dnsSuffix == "" {
+		dnsSuffix = defaultKeyVaultDNSSuffix
+	}
+
 	// Establish a connection to the Key Vault client
-	client, err := azsecrets.NewClient(fmt.Sprintf("https://%s.%s", name, "vault.azure.net"), cred, nil)
+	client, err := azsecrets.NewClient(fmt.Sprintf("https://%s.%s", name, dnsSuffix), cred, nil)
 	if err != nil {
 		log.Fatalf("failed to create Key Vault client: %v", err)
 	}
