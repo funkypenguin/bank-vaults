@@ -2,18 +2,15 @@
 
 | Maintainer           | GitHub ID                                         | Affiliation                                 |
 |----------------------|---------------------------------------------------|---------------------------------------------|
-| Mark Sagi-Kazar      | [sagikazarmark](https://github.com/sagikazarmark) | [OpenMeter](https://openmeter.io)           |
+| Bence Csati          | [csatib02](https://github.com/csatib02)           | [Axoflow](https://axoflow.com)              |
+| Mark Sagi-Kazar      | [sagikazarmark](https://github.com/sagikazarmark) | -                                           |
 | Andras Jaky          | [akijakya](https://github.com/akijakya)           | [Outshift](https://outshift.com) (by Cisco) |
 | Ramiz Polic          | [ramizpolic](https://github.com/ramizpolic)       | [Outshift](https://outshift.com) (by Cisco) |
-| Bence Csati          | [csatib02](https://github.com/csatib02)           | [Outshift](https://outshift.com) (by Cisco) |
-| Jürgen Weber         | [jurgenweber](https://github.com/jurgenweber)     | [hipages](https://hipagesgroup.com.au)      |
-| Francesco Ciocchetti | [primeroz](https://github.com/primeroz)           | Individual                                  |
-| Cosmin Cojocar       | [ccojocar](https://github.com/ccojocar)           | [Jenkins X](https://jenkins-x.io)           |
 
-## Alumni
+## Emeritus Maintainers
 
 | Maintainer     | GitHub ID                                   | Affiliation                                 |
 |----------------|---------------------------------------------|---------------------------------------------|
-| Nandor Kracser | [bonifaido](https://github.com/bonifaido)   | [Outshift](https://outshift.com) (by Cisco) |
-| Peter Balogh   | [pbalogh-sa](https://github.com/pbalogh-sa) | [Outshift](https://outshift.com) (by Cisco) |
-| Janos Matyas   | [matyix](https://github.com/matyix)         | [Outshift](https://outshift.com) (by Cisco) |
+| Nandor Kracser | [bonifaido](https://github.com/bonifaido)   | [Riptides](https://riptides.io/)            |
+| Peter Balogh   | [pbalogh-sa](https://github.com/pbalogh-sa) | [Riptides](https://riptides.io/)            |
+| Janos Matyas   | [matyix](https://github.com/matyix)         | [Riptides](https://riptides.io/)            |
