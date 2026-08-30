@@ -136,7 +136,7 @@ func readStartupSecret(ctx context.Context, startupSecret startupSecret, secretE
 func generateCertPayload(data interface{}) (map[string]interface{}, error) {
 	pkiData, err := cast.ToStringMapStringE(data)
 	if err != nil {
-		return map[string]interface{}{}, errors.Wrapf(err, "cast to map[string]... failed: %v", data)
+		return map[string]interface{}{}, errors.Wrap(err, "cast to map[string]string failed")
 	}
 
 	pkiSlice := []string{}
@@ -145,7 +145,7 @@ func generateCertPayload(data interface{}) (map[string]interface{}, error) {
 	}
 
 	if len(pkiSlice) < 2 {
-		return map[string]interface{}{}, errors.Errorf("missing key or certificate in pki data: %v", pkiData)
+		return map[string]interface{}{}, errors.New("missing key or certificate in pki data")
 	}
 
 	return map[string]interface{}{"pem_bundle": strings.Join(pkiSlice, "\n")}, nil

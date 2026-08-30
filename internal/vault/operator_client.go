@@ -349,7 +349,7 @@ func (v *vault) Init(ctx context.Context) error {
 			NoParent:    true,
 		})
 		if err != nil {
-			return errors.Wrapf(err, "unable to setup requested root token, (temporary root token: '%s')", resp.RootToken)
+			return errors.Wrap(err, "unable to setup requested root token")
 		}
 
 		// revoke the temporary token
@@ -361,12 +361,12 @@ func (v *vault) Init(ctx context.Context) error {
 	}
 
 	if v.config.StoreRootToken {
-		if err = v.keyStoreSet(ctx, keyRootToken, []byte(resp.RootToken)); err != nil {
-			return errors.Wrapf(err, "error storing root token '%s' in key'%s'", rootToken, keyRootToken)
+		if err = v.keyStoreSet(ctx, keyRootToken, []byte(rootToken)); err != nil {
+			return errors.Wrapf(err, "error storing root token in key '%s'", keyRootToken)
 		}
 		slog.With(slog.String("key", keyRootToken)).Info("root token stored in key store")
 	} else if v.config.InitRootToken == "" {
-		slog.With(slog.String("root-token", resp.RootToken)).Warn("won't store root token in key store, this token grants full privileges to vault, so keep this secret")
+		slog.Warn("won't store root token in key store; retrieve it from the configured init output, not from logs")
 	}
 
 	return nil
